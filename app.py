@@ -45,8 +45,6 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "reservas_cana_brava_v2.db"
 
 app = Flask(__name__)
-with app.app_context():
-    init_db()
 app.config["SECRET_KEY"] = "cambiar-esta-clave-en-produccion-v2"
 
 
