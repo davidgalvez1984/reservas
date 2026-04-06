@@ -46,8 +46,6 @@ DB_PATH = BASE_DIR / "reservas_cana_brava_v2.db"
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "cambiar-esta-clave-en-produccion-v2"
-with app.app_context():
-    init_db()
 
 # =========================
 # Base de datos
@@ -126,6 +124,7 @@ def init_db() -> None:
             );
             """
         )
+        init_db()
 
         cur.execute("SELECT COUNT(*) FROM resources")
         if cur.fetchone()[0] == 0:
