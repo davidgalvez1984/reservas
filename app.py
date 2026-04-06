@@ -124,53 +124,8 @@ def init_db() -> None:
             );
             """
         )
+
         cur.execute("SELECT COUNT(*) FROM resources")
-        if cur.fetchone()[0] == 0:
-            cur.executemany(
-                "INSERT INTO resources (codigo, nombre, tipo_exclusividad, capacidad_maxima) VALUES (?, ?, ?, ?)",
-                [
-                    ("SALON", "Salón social", "exclusivo", 40),
-                    ("PISCINA", "Piscina", "compartido", 10),
-                ],
-            )
-
-        config_default = {
-            "dias_anticipacion_salon": "2",
-            "hora_inicio_salon": "09:00",
-            "hora_fin_salon": "21:00",
-            "hora_inicio_piscina": "09:00",
-            "hora_fin_piscina": "21:00",
-            "dia_cierre_piscina": "1",
-            "max_reservas_salon_mes": "2",
-            "max_reservas_piscina_mes": "8",
-            "max_dias_adelanto": "60",
-            "auto_aprobar_salon": "0",
-            "auto_aprobar_piscina": "1",
-        }
-
-        for clave, valor in config_default.items():
-            cur.execute(
-                "INSERT OR IGNORE INTO config (clave, valor) VALUES (?, ?)",
-                (clave, valor),
-            )
-
-        cur.execute("SELECT COUNT(*) FROM users")
-        if cur.fetchone()[0] == 0:
-            cur.executemany(
-                """
-                INSERT INTO users (username, password, nombre, propiedad, rol, activo, al_dia, residente_permanente)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    ("admin", "admin123", "Administrador", "Administración", "admin", 1, 1, 1),
-                    ("casa01", "demo123", "Residente Demo", "Casa 01", "residente", 1, 1, 1),
-                ],
-            )
-
-        db.commit()
-    db.close()
-        cur.execute("SELECT COUNT(*) FROM resources")
-      
         if cur.fetchone()[0] == 0:
             cur.executemany(
                 "INSERT INTO resources (codigo, nombre, tipo_exclusividad, capacidad_maxima) VALUES (?, ?, ?, ?)",
@@ -211,7 +166,10 @@ def init_db() -> None:
         db.commit()
     db.close()
 
+# Inicializa la base de datos al importar el módulo (Render/Gunicorn)
 init_db()
+
+
 # =========================
 # Utilidades
 # =========================
@@ -1790,4 +1748,4 @@ def admin_config():
 
 
 if __name__ == "__main__":
-     app.run(debug=True)
+    app.run(debug=True)
