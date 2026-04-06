@@ -22,12 +22,15 @@ Usuarios iniciales:
 from __future__ import annotations
 
 import calendar as pycalendar
-import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timedelta
 from functools import wraps
+import os
 from pathlib import Path
 from typing import Optional
+
+import psycopg
+from psycopg.rows import dict_row
 
 from flask import (
     Flask,
@@ -42,20 +45,63 @@ from flask import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "reservas_cana_brava_v2.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("No se encontró la variable de entorno DATABASE_URL.")
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "cambiar-esta-clave-en-produccion-v2"
 
 # =========================
-# Base de datos
+# Base de datos (PostgreSQL)
 # =========================
-def get_db() -> sqlite3.Connection:
+class PgCursorCompat:
+    def __init__(self, cursor):
+        self.cursor = cursor
+
+    def fetchone(self):
+        return self.cursor.fetchone()
+
+    def fetchall(self):
+        return self.cursor.fetchall()
+
+    def __iter__(self):
+        return iter(self.cursor)
+
+
+class PgConnCompat:
+    """Adaptador para conservar el estilo db.execute(sql, params) de SQLite."""
+    def __init__(self, conn):
+        self.conn = conn
+
+    def execute(self, query, params=None):
+        query = query.replace("?", "%s")
+        cur = self.conn.cursor()
+        cur.execute(query, params or ())
+        return PgCursorCompat(cur)
+
+    def executemany(self, query, seq_of_params):
+        query = query.replace("?", "%s")
+        cur = self.conn.cursor()
+        cur.executemany(query, seq_of_params)
+        return PgCursorCompat(cur)
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+
+def get_raw_pg_connection():
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
+
+def get_db():
     if "db" not in g:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        ensure_db_initialized(conn)
-        g.db = conn
+        raw_conn = get_raw_pg_connection()
+        g.db = PgConnCompat(raw_conn)
     return g.db
 
 
@@ -67,218 +113,126 @@ def close_db(exception):
 
 
 def init_db() -> None:
-    db = sqlite3.connect(DB_PATH)
-    with closing(db.cursor()) as cur:
-        cur.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL,
-                nombre TEXT NOT NULL,
-                propiedad TEXT NOT NULL,
-                rol TEXT NOT NULL CHECK(rol IN ('admin', 'residente')),
-                activo INTEGER NOT NULL DEFAULT 1,
-                al_dia INTEGER NOT NULL DEFAULT 1,
-                residente_permanente INTEGER NOT NULL DEFAULT 1
-            );
-
-            CREATE TABLE IF NOT EXISTS resources (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                codigo TEXT UNIQUE NOT NULL,
-                nombre TEXT NOT NULL,
-                tipo_exclusividad TEXT NOT NULL CHECK(tipo_exclusividad IN ('exclusivo', 'compartido')),
-                capacidad_maxima INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS config (
-                clave TEXT PRIMARY KEY,
-                valor TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS blocked_dates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                resource_id INTEGER NOT NULL,
-                fecha TEXT NOT NULL,
-                motivo TEXT,
-                UNIQUE(resource_id, fecha),
-                FOREIGN KEY(resource_id) REFERENCES resources(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS reservations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                resource_id INTEGER NOT NULL,
-                fecha TEXT NOT NULL,
-                hora_inicio TEXT NOT NULL,
-                hora_fin TEXT NOT NULL,
-                asistentes INTEGER NOT NULL DEFAULT 1,
-                invitados_registrados TEXT DEFAULT '',
-                estado TEXT NOT NULL CHECK(estado IN ('pendiente', 'aprobada', 'rechazada', 'cancelada', 'requiere_ajuste')) DEFAULT 'pendiente',
-                observaciones TEXT DEFAULT '',
-                motivo_rechazo TEXT DEFAULT '',
-                nota_admin TEXT DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT DEFAULT '',
-                FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(resource_id) REFERENCES resources(id)
-            );
-            """
-        )
-
-        cur.execute("SELECT COUNT(*) FROM resources")
-        if cur.fetchone()[0] == 0:
-            cur.executemany(
-                "INSERT INTO resources (codigo, nombre, tipo_exclusividad, capacidad_maxima) VALUES (?, ?, ?, ?)",
-                [
-                    ("SALON", "Salón social", "exclusivo", 40),
-                    ("PISCINA", "Piscina", "compartido", 10),
-                ],
-            )
-
-        config_default = {
-            "dias_anticipacion_salon": "2",
-            "hora_inicio_salon": "09:00",
-            "hora_fin_salon": "21:00",
-            "hora_inicio_piscina": "09:00",
-            "hora_fin_piscina": "21:00",
-            "dia_cierre_piscina": "1",  # martes
-            "max_reservas_salon_mes": "2",
-            "max_reservas_piscina_mes": "8",
-            "max_dias_adelanto": "60",
-            "auto_aprobar_salon": "0",
-            "auto_aprobar_piscina": "1",
-        }
-        for clave, valor in config_default.items():
-            cur.execute("INSERT OR IGNORE INTO config (clave, valor) VALUES (?, ?)", (clave, valor))
-
-        cur.execute("SELECT COUNT(*) FROM users")
-        if cur.fetchone()[0] == 0:
-            cur.executemany(
+    with psycopg.connect(DATABASE_URL) as db:
+        with db.cursor() as cur:
+            cur.execute(
                 """
-                INSERT INTO users (username, password, nombre, propiedad, rol, activo, al_dia, residente_permanente)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    ("admin", "admin123", "Administrador", "Administración", "admin", 1, 1, 1),
-                    ("casa01", "demo123", "Residente Demo", "Casa 01", "residente", 1, 1, 1),
-                ],
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    nombre TEXT NOT NULL,
+                    propiedad TEXT NOT NULL,
+                    rol TEXT NOT NULL CHECK(rol IN ('admin', 'residente')),
+                    activo INTEGER NOT NULL DEFAULT 1,
+                    al_dia INTEGER NOT NULL DEFAULT 1,
+                    residente_permanente INTEGER NOT NULL DEFAULT 1
+                );
+                """
             )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS resources (
+                    id SERIAL PRIMARY KEY,
+                    codigo TEXT UNIQUE NOT NULL,
+                    nombre TEXT NOT NULL,
+                    tipo_exclusividad TEXT NOT NULL CHECK(tipo_exclusividad IN ('exclusivo', 'compartido')),
+                    capacidad_maxima INTEGER NOT NULL
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config (
+                    clave TEXT PRIMARY KEY,
+                    valor TEXT NOT NULL
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blocked_dates (
+                    id SERIAL PRIMARY KEY,
+                    resource_id INTEGER NOT NULL REFERENCES resources(id),
+                    fecha TEXT NOT NULL,
+                    motivo TEXT,
+                    UNIQUE(resource_id, fecha)
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reservations (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    resource_id INTEGER NOT NULL REFERENCES resources(id),
+                    fecha TEXT NOT NULL,
+                    hora_inicio TEXT NOT NULL,
+                    hora_fin TEXT NOT NULL,
+                    asistentes INTEGER NOT NULL DEFAULT 1,
+                    invitados_registrados TEXT DEFAULT '',
+                    estado TEXT NOT NULL CHECK(estado IN ('pendiente', 'aprobada', 'rechazada', 'cancelada', 'requiere_ajuste')) DEFAULT 'pendiente',
+                    observaciones TEXT DEFAULT '',
+                    motivo_rechazo TEXT DEFAULT '',
+                    nota_admin TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT DEFAULT ''
+                );
+                """
+            )
+
+            cur.execute("SELECT COUNT(*) FROM resources")
+            if cur.fetchone()[0] == 0:
+                cur.executemany(
+                    "INSERT INTO resources (codigo, nombre, tipo_exclusividad, capacidad_maxima) VALUES (%s, %s, %s, %s)",
+                    [
+                        ("SALON", "Salón social", "exclusivo", 40),
+                        ("PISCINA", "Piscina", "compartido", 10),
+                    ],
+                )
+
+            config_default = {
+                "dias_anticipacion_salon": "2",
+                "hora_inicio_salon": "09:00",
+                "hora_fin_salon": "21:00",
+                "hora_inicio_piscina": "09:00",
+                "hora_fin_piscina": "21:00",
+                "dia_cierre_piscina": "1",
+                "max_reservas_salon_mes": "2",
+                "max_reservas_piscina_mes": "8",
+                "max_dias_adelanto": "60",
+                "auto_aprobar_salon": "0",
+                "auto_aprobar_piscina": "1",
+            }
+            for clave, valor in config_default.items():
+                cur.execute(
+                    "INSERT INTO config (clave, valor) VALUES (%s, %s) ON CONFLICT (clave) DO NOTHING",
+                    (clave, valor),
+                )
+
+            cur.execute("SELECT COUNT(*) FROM users")
+            if cur.fetchone()[0] == 0:
+                cur.executemany(
+                    """
+                    INSERT INTO users (username, password, nombre, propiedad, rol, activo, al_dia, residente_permanente)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        ("admin", "admin123", "Administrador", "Administración", "admin", 1, 1, 1),
+                        ("casa01", "demo123", "Residente Demo", "Casa 01", "residente", 1, 1, 1),
+                    ],
+                )
+
         db.commit()
-    db.close()
 
-def ensure_db_initialized(conn: sqlite3.Connection) -> None:
-    cur = conn.cursor()
 
-    cur.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            nombre TEXT NOT NULL,
-            propiedad TEXT NOT NULL,
-            rol TEXT NOT NULL CHECK(rol IN ('admin', 'residente')),
-            activo INTEGER NOT NULL DEFAULT 1,
-            al_dia INTEGER NOT NULL DEFAULT 1,
-            residente_permanente INTEGER NOT NULL DEFAULT 1
-        );
-
-        CREATE TABLE IF NOT EXISTS resources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            codigo TEXT UNIQUE NOT NULL,
-            nombre TEXT NOT NULL,
-            tipo_exclusividad TEXT NOT NULL CHECK(tipo_exclusividad IN ('exclusivo', 'compartido')),
-            capacidad_maxima INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS config (
-            clave TEXT PRIMARY KEY,
-            valor TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS blocked_dates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            resource_id INTEGER NOT NULL,
-            fecha TEXT NOT NULL,
-            motivo TEXT,
-            UNIQUE(resource_id, fecha),
-            FOREIGN KEY(resource_id) REFERENCES resources(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS reservations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            resource_id INTEGER NOT NULL,
-            fecha TEXT NOT NULL,
-            hora_inicio TEXT NOT NULL,
-            hora_fin TEXT NOT NULL,
-            asistentes INTEGER NOT NULL DEFAULT 1,
-            invitados_registrados TEXT DEFAULT '',
-            estado TEXT NOT NULL CHECK(estado IN ('pendiente', 'aprobada', 'rechazada', 'cancelada', 'requiere_ajuste')) DEFAULT 'pendiente',
-            observaciones TEXT DEFAULT '',
-            motivo_rechazo TEXT DEFAULT '',
-            nota_admin TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT DEFAULT '',
-            FOREIGN KEY(user_id) REFERENCES users(id),
-            FOREIGN KEY(resource_id) REFERENCES resources(id)
-        );
-        """
-    )
-
-    cur.execute("SELECT COUNT(*) FROM resources")
-    if cur.fetchone()[0] == 0:
-        cur.executemany(
-            "INSERT INTO resources (codigo, nombre, tipo_exclusividad, capacidad_maxima) VALUES (?, ?, ?, ?)",
-            [
-                ("SALON", "Salón social", "exclusivo", 40),
-                ("PISCINA", "Piscina", "compartido", 10),
-            ],
-        )
-
-    config_default = {
-        "dias_anticipacion_salon": "2",
-        "hora_inicio_salon": "09:00",
-        "hora_fin_salon": "21:00",
-        "hora_inicio_piscina": "09:00",
-        "hora_fin_piscina": "21:00",
-        "dia_cierre_piscina": "1",
-        "max_reservas_salon_mes": "2",
-        "max_reservas_piscina_mes": "8",
-        "max_dias_adelanto": "60",
-        "auto_aprobar_salon": "0",
-        "auto_aprobar_piscina": "1",
-    }
-
-    for clave, valor in config_default.items():
-        cur.execute(
-            "INSERT OR IGNORE INTO config (clave, valor) VALUES (?, ?)",
-            (clave, valor),
-        )
-
-    cur.execute("SELECT COUNT(*) FROM users")
-    if cur.fetchone()[0] == 0:
-        cur.executemany(
-            """
-            INSERT INTO users (username, password, nombre, propiedad, rol, activo, al_dia, residente_permanente)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                ("admin", "admin123", "Administrador", "Administración", "admin", 1, 1, 1),
-                ("casa01", "demo123", "Residente Demo", "Casa 01", "residente", 1, 1, 1),
-            ],
-        )
-
-    conn.commit()
-
-# Inicializa la base de datos al importar el módulo (Render/Gunicorn)
 init_db()
 
 
-# =========================
-# Utilidades
-# =========================
 def get_config(clave: str, default: Optional[str] = None) -> str:
     db = get_db()
     row = db.execute("SELECT valor FROM config WHERE clave = ?", (clave,)).fetchone()
