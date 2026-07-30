@@ -125,6 +125,7 @@ def init_db() -> None:
                     id SERIAL PRIMARY KEY,
                     username TEXT UNIQUE NOT NULL,
                     password TEXT NOT NULL,
+                    documento TEXT,
                     nombre TEXT NOT NULL,
                     propiedad TEXT NOT NULL,
                     rol TEXT NOT NULL CHECK(rol IN ('admin', 'residente')),
@@ -132,6 +133,17 @@ def init_db() -> None:
                     al_dia INTEGER NOT NULL DEFAULT 1,
                     residente_permanente INTEGER NOT NULL DEFAULT 1
                 );
+                """
+            )
+
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS documento TEXT")
+            cur.execute(
+                """
+                UPDATE users
+                SET documento = password
+                WHERE (documento IS NULL OR documento = '')
+                  AND password NOT LIKE 'pbkdf2:%'
+                  AND password NOT LIKE 'scrypt:%'
                 """
             )
 
@@ -222,12 +234,12 @@ def init_db() -> None:
             if cur.fetchone()[0] == 0:
                 cur.executemany(
                     """
-                    INSERT INTO users (username, password, nombre, propiedad, rol, activo, al_dia, residente_permanente)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO users (username, password, documento, nombre, propiedad, rol, activo, al_dia, residente_permanente)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     [
-                        ("admin", "admin123", "Administrador", "Administración", "admin", 1, 1, 1),
-                        ("casa01", "demo123", "Residente Demo", "Casa 01", "residente", 1, 1, 1),
+                        ("admin", "admin123", "admin", "Administrador", "Administración", "admin", 1, 1, 1),
+                        ("casa01", "demo123", "demo", "Residente Demo", "Casa 01", "residente", 1, 1, 1),
                     ],
                 )
 
@@ -253,6 +265,12 @@ def verify_password(stored_password: str, submitted_password: str) -> bool:
 
 def hash_password(password: str) -> str:
     return generate_password_hash(password)
+
+
+def display_property(value: str) -> str:
+    """Muestra 'Lote N' cuando el valor contiene únicamente números."""
+    text_value = str(value or "").strip()
+    return f"Lote {text_value}" if text_value.isdigit() else text_value
 
 
 def get_config(clave: str, default: Optional[str] = None) -> str:
@@ -644,6 +662,7 @@ BASE_HTML = """
 
 
 def render_page(content: str, **context):
+    context.setdefault("display_property", display_property)
     rendered_content = render_template_string(content, **context)
     return render_template_string(BASE_HTML, content=rendered_content, **context)
 
@@ -759,7 +778,8 @@ def mi_cuenta():
             <dl class="row mb-0">
               <dt class="col-sm-4">Nombre</dt><dd class="col-sm-8">{{ user['nombre'] }}</dd>
               <dt class="col-sm-4">Usuario</dt><dd class="col-sm-8">{{ user['username'] }}</dd>
-              <dt class="col-sm-4">Propiedad</dt><dd class="col-sm-8">{{ user['propiedad'] }}</dd>
+              <dt class="col-sm-4">Propiedad</dt><dd class="col-sm-8">{{ display_property(user['propiedad']) }}</dd>
+              <dt class="col-sm-4">Rol</dt><dd class="col-sm-8">{{ 'Administrador' if user['rol'] == 'admin' else 'Residente' }}</dd>
               <dt class="col-sm-4">Estado</dt>
               <dd class="col-sm-8">{{ 'Al día' if user['al_dia'] else 'Pendiente de pago' }}</dd>
             </dl>
@@ -1664,14 +1684,15 @@ def admin_users():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "").strip()
+        documento = request.form.get("documento", "").strip()
         nombre = request.form.get("nombre", "").strip()
         propiedad = request.form.get("propiedad", "").strip()
         rol = request.form.get("rol", "residente").strip()
         al_dia = 1 if request.form.get("al_dia") == "on" else 0
         residente_permanente = 1 if request.form.get("residente_permanente") == "on" else 0
 
-        if not all([username, password, nombre, propiedad]):
-            flash("Todos los campos principales son obligatorios.", "danger")
+        if not all([username, password, documento, nombre, propiedad]):
+            flash("Usuario, documento, contraseña, nombre y propiedad son obligatorios.", "danger")
         elif rol not in ("admin", "residente"):
             flash("El rol seleccionado no es válido.", "danger")
         else:
@@ -1679,10 +1700,10 @@ def admin_users():
                 db.execute(
                     """
                     INSERT INTO users
-                    (username, password, nombre, propiedad, rol, activo, al_dia, residente_permanente)
-                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    (username, password, documento, nombre, propiedad, rol, activo, al_dia, residente_permanente)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
-                    (username, hash_password(password), nombre, propiedad, rol, al_dia, residente_permanente),
+                    (username, hash_password(password), documento, nombre, propiedad, rol, al_dia, residente_permanente),
                 )
                 db.commit()
                 flash("Usuario creado correctamente.", "success")
@@ -1697,9 +1718,9 @@ def admin_users():
     query = "SELECT * FROM users WHERE 1=1"
     params = []
     if q:
-        query += " AND (LOWER(username) LIKE LOWER(?) OR LOWER(nombre) LIKE LOWER(?) OR LOWER(propiedad) LIKE LOWER(?))"
+        query += " AND (LOWER(username) LIKE LOWER(?) OR LOWER(COALESCE(documento, '')) LIKE LOWER(?) OR LOWER(nombre) LIKE LOWER(?) OR LOWER(propiedad) LIKE LOWER(?))"
         criterio = f"%{q}%"
-        params.extend([criterio, criterio, criterio])
+        params.extend([criterio, criterio, criterio, criterio])
     if estado == "activos":
         query += " AND activo = 1"
     elif estado == "inactivos":
@@ -1718,9 +1739,17 @@ def admin_users():
             <h4>Nuevo usuario</h4>
             <form method="post">
               <div class="mb-2"><label class="form-label">Usuario</label><input name="username" class="form-control" required></div>
-              <div class="mb-2"><label class="form-label">Contraseña inicial</label><input name="password" type="password" class="form-control" required></div>
+              <div class="mb-2"><label class="form-label">Documento</label><input name="documento" class="form-control" required></div>
+              <div class="mb-2">
+                <label class="form-label">Contraseña</label>
+                <input name="password" type="password" class="form-control" required>
+                <div class="form-text">El usuario podrá cambiarla posteriormente desde “Mi cuenta”.</div>
+              </div>
               <div class="mb-2"><label class="form-label">Nombre</label><input name="nombre" class="form-control" required></div>
-              <div class="mb-2"><label class="form-label">Propiedad</label><input name="propiedad" class="form-control" placeholder="Lote 12" required></div>
+              <div class="mb-2">
+                <label class="form-label">Propiedad</label>
+                <input name="propiedad" class="form-control" placeholder="Ejemplos: 12, Casa 8, Local 4" required>
+              </div>
               <div class="mb-2">
                 <label class="form-label">Rol</label>
                 <select name="rol" class="form-select">
@@ -1753,7 +1782,7 @@ def admin_users():
 
             <form method="get" class="row g-2 mb-3">
               <div class="col-md-7">
-                <input name="q" class="form-control" value="{{ q }}" placeholder="Buscar por usuario, nombre o lote">
+                <input name="q" class="form-control" value="{{ q }}" placeholder="Buscar por usuario, documento, nombre o propiedad">
               </div>
               <div class="col-md-3">
                 <select name="estado" class="form-select">
@@ -1781,7 +1810,7 @@ def admin_users():
                     <tr>
                       <td>{{ u['username'] }}</td>
                       <td>{{ u['nombre'] }}</td>
-                      <td>{{ u['propiedad'] }}</td>
+                      <td>{{ display_property(u['propiedad']) }}</td>
                       <td>{{ u['rol'] }}</td>
                       <td><span class="badge text-bg-{{ 'success' if u['al_dia'] else 'danger' }}">{{ 'Sí' if u['al_dia'] else 'No' }}</span></td>
                       <td><span class="badge text-bg-{{ 'success' if u['activo'] else 'secondary' }}">{{ 'Activo' if u['activo'] else 'Inactivo' }}</span></td>
@@ -1791,7 +1820,9 @@ def admin_users():
                           <a class="btn btn-sm btn-outline-warning" href="{{ url_for('admin_restablecer_password', user_id=u['id']) }}">Restablecer contraseña</a>
                           {% if u['id'] != session.get('user_id') %}
                             <form method="post" action="{{ url_for('admin_toggle_usuario', user_id=u['id']) }}" class="d-inline">
-                              <button class="btn btn-sm btn-outline-{{ 'secondary' if u['activo'] else 'success' }}" onclick="return confirm('¿Confirmar cambio de estado del usuario?')">
+                              <button
+                                class="btn btn-sm btn-outline-{{ 'secondary' if u['activo'] else 'success' }}"
+                                onclick="return confirm({{ ('¿Desea desactivar este usuario?\n\nNo podrá ingresar al sistema hasta que vuelva a activarse.' if u['activo'] else '¿Desea activar este usuario?\n\nPodrá ingresar nuevamente al sistema.')|tojson }})">
                                 {{ 'Desactivar' if u['activo'] else 'Activar' }}
                               </button>
                             </form>
@@ -1823,14 +1854,15 @@ def admin_editar_usuario(user_id: int):
 
     if request.method == "POST":
         username = request.form.get("username", "").strip()
+        documento = request.form.get("documento", "").strip()
         nombre = request.form.get("nombre", "").strip()
         propiedad = request.form.get("propiedad", "").strip()
         rol = request.form.get("rol", "residente").strip()
         al_dia = 1 if request.form.get("al_dia") == "on" else 0
         residente_permanente = 1 if request.form.get("residente_permanente") == "on" else 0
 
-        if not all([username, nombre, propiedad]):
-            flash("Usuario, nombre y propiedad son obligatorios.", "danger")
+        if not all([username, documento, nombre, propiedad]):
+            flash("Usuario, documento, nombre y propiedad son obligatorios.", "danger")
         elif rol not in ("admin", "residente"):
             flash("El rol seleccionado no es válido.", "danger")
         else:
@@ -1838,11 +1870,11 @@ def admin_editar_usuario(user_id: int):
                 db.execute(
                     """
                     UPDATE users
-                    SET username = ?, nombre = ?, propiedad = ?, rol = ?,
+                    SET username = ?, documento = ?, nombre = ?, propiedad = ?, rol = ?,
                         al_dia = ?, residente_permanente = ?
                     WHERE id = ?
                     """,
-                    (username, nombre, propiedad, rol, al_dia, residente_permanente, user_id),
+                    (username, documento, nombre, propiedad, rol, al_dia, residente_permanente, user_id),
                 )
                 db.commit()
                 if user_id == session.get("user_id"):
@@ -1862,8 +1894,9 @@ def admin_editar_usuario(user_id: int):
             <h3>Editar usuario</h3>
             <form method="post">
               <div class="mb-3"><label class="form-label">Usuario</label><input name="username" class="form-control" value="{{ user['username'] }}" required></div>
+              <div class="mb-3"><label class="form-label">Documento</label><input name="documento" class="form-control" value="{{ user['documento'] or '' }}" required></div>
               <div class="mb-3"><label class="form-label">Nombre</label><input name="nombre" class="form-control" value="{{ user['nombre'] }}" required></div>
-              <div class="mb-3"><label class="form-label">Propiedad</label><input name="propiedad" class="form-control" value="{{ user['propiedad'] }}" required></div>
+              <div class="mb-3"><label class="form-label">Propiedad</label><input name="propiedad" class="form-control" value="{{ display_property(user['propiedad']) }}" required></div>
               <div class="mb-3">
                 <label class="form-label">Rol</label>
                 <select name="rol" class="form-select">
@@ -1923,18 +1956,18 @@ def admin_restablecer_password(user_id: int):
             <h3>Restablecer contraseña</h3>
             <p class="small-muted">
               Usuario: <strong>{{ user['username'] }}</strong><br>
-              Propietario: {{ user['nombre'] }} — {{ user['propiedad'] }}
+              Propietario: {{ user['nombre'] }} — {{ display_property(user['propiedad']) }}
             </p>
             <div class="alert alert-warning">
               La contraseña actual no se muestra. Solo será reemplazada por una nueva.
             </div>
             <form method="post">
               <div class="mb-3">
-                <label class="form-label">Nueva contraseña temporal</label>
+                <label class="form-label">Nueva contraseña</label>
                 <input type="password" name="password_nueva" class="form-control" required minlength="6">
               </div>
               <div class="mb-3">
-                <label class="form-label">Confirmar contraseña</label>
+                <label class="form-label">Confirmar nueva contraseña</label>
                 <input type="password" name="password_confirmar" class="form-control" required minlength="6">
               </div>
               <button class="btn btn-warning">Restablecer contraseña</button>
