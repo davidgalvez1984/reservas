@@ -1822,7 +1822,7 @@ def admin_users():
                             <form method="post" action="{{ url_for('admin_toggle_usuario', user_id=u['id']) }}" class="d-inline">
                               <button
                                 class="btn btn-sm btn-outline-{{ 'secondary' if u['activo'] else 'success' }}"
-                                onclick="return confirm({{ ('¿Desea desactivar este usuario?\n\nNo podrá ingresar al sistema hasta que vuelva a activarse.' if u['activo'] else '¿Desea activar este usuario?\n\nPodrá ingresar nuevamente al sistema.')|tojson }})">
+                                onclick='return confirm({{ ("¿Desea desactivar este usuario?\n\nNo podrá ingresar al sistema hasta que vuelva a activarse." if u["activo"] else "¿Desea activar este usuario?\n\nPodrá ingresar nuevamente al sistema.")|tojson }})'>
                                 {{ 'Desactivar' if u['activo'] else 'Activar' }}
                               </button>
                             </form>
