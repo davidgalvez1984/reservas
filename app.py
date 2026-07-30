@@ -31,6 +31,7 @@ from typing import Optional
 
 import psycopg
 from psycopg.rows import dict_row
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from flask import (
     Flask,
@@ -51,7 +52,7 @@ if not DATABASE_URL:
     raise RuntimeError("No se encontró la variable de entorno DATABASE_URL.")
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "cambiar-esta-clave-en-produccion-v2"
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "cambiar-esta-clave-en-produccion-v3")
 
 # =========================
 # Base de datos (PostgreSQL)
@@ -89,6 +90,9 @@ class PgConnCompat:
 
     def commit(self):
         self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
 
     def close(self):
         self.conn.close()
@@ -231,6 +235,24 @@ def init_db() -> None:
 
 
 init_db()
+
+
+
+def verify_password(stored_password: str, submitted_password: str) -> bool:
+    """
+    Compatibilidad gradual:
+    - Contraseñas antiguas importadas: texto plano.
+    - Contraseñas cambiadas o restablecidas: hash seguro.
+    """
+    if not stored_password:
+        return False
+    if stored_password.startswith(("pbkdf2:", "scrypt:")):
+        return check_password_hash(stored_password, submitted_password)
+    return stored_password == submitted_password
+
+
+def hash_password(password: str) -> str:
+    return generate_password_hash(password)
 
 
 def get_config(clave: str, default: Optional[str] = None) -> str:
@@ -593,6 +615,7 @@ BASE_HTML = """
           <a class="btn btn-outline-light btn-sm" href="{{ url_for('mis_reservas') }}">Mis reservas</a>
           <a class="btn btn-outline-light btn-sm" href="{{ url_for('user_calendar') }}">Calendario</a>
         {% endif %}
+        <a class="btn btn-outline-light btn-sm" href="{{ url_for('mi_cuenta') }}">Mi cuenta</a>
         <span class="navbar-text text-white me-2">{{ session.get('nombre') }} ({{ session.get('rol') }})</span>
         <a class="btn btn-outline-light btn-sm" href="{{ url_for('logout') }}">Salir</a>
       {% endif %}
@@ -635,11 +658,11 @@ def login():
         password = request.form.get("password", "").strip()
         db = get_db()
         user = db.execute(
-            "SELECT * FROM users WHERE username = ? AND password = ? AND activo = 1",
-            (username, password),
+            "SELECT * FROM users WHERE username = ? AND activo = 1",
+            (username,),
         ).fetchone()
 
-        if user:
+        if user and verify_password(user["password"], password):
             session.clear()
             session["user_id"] = user["id"]
             session["rol"] = user["rol"]
@@ -666,11 +689,6 @@ def login():
               </div>
               <button class="btn btn-dark w-100">Entrar</button>
             </form>
-            <hr>
-            <div class="small-muted">
-              <strong>Demo admin:</strong> admin / admin123<br>
-              <strong>Demo residente:</strong> casa01 / demo123
-            </div>
           </div>
         </div>
       </div>
@@ -695,6 +713,87 @@ def index():
     if session.get("rol") == "admin":
         return redirect(url_for("admin_dashboard"))
     return redirect(url_for("mis_reservas"))
+
+
+
+# =========================
+# Mi cuenta
+# =========================
+@app.route("/mi-cuenta", methods=["GET", "POST"])
+@login_required
+def mi_cuenta():
+    db = get_db()
+    user = current_user()
+    if not user:
+        session.clear()
+        return redirect(url_for("login"))
+
+    if request.method == "POST":
+        actual = request.form.get("password_actual", "")
+        nueva = request.form.get("password_nueva", "")
+        confirmar = request.form.get("password_confirmar", "")
+
+        if not verify_password(user["password"], actual):
+            flash("La contraseña actual no es correcta.", "danger")
+        elif len(nueva) < 6:
+            flash("La nueva contraseña debe tener mínimo 6 caracteres.", "warning")
+        elif nueva != confirmar:
+            flash("La confirmación no coincide con la nueva contraseña.", "danger")
+        elif actual == nueva:
+            flash("La nueva contraseña debe ser diferente de la actual.", "warning")
+        else:
+            db.execute(
+                "UPDATE users SET password = ? WHERE id = ?",
+                (hash_password(nueva), user["id"]),
+            )
+            db.commit()
+            flash("Contraseña actualizada correctamente.", "success")
+            return redirect(url_for("mi_cuenta"))
+
+    content = """
+    <div class="row g-4">
+      <div class="col-lg-5">
+        <div class="card card-shadow">
+          <div class="card-body">
+            <h3 class="mb-3">Mi cuenta</h3>
+            <dl class="row mb-0">
+              <dt class="col-sm-4">Nombre</dt><dd class="col-sm-8">{{ user['nombre'] }}</dd>
+              <dt class="col-sm-4">Usuario</dt><dd class="col-sm-8">{{ user['username'] }}</dd>
+              <dt class="col-sm-4">Propiedad</dt><dd class="col-sm-8">{{ user['propiedad'] }}</dd>
+              <dt class="col-sm-4">Estado</dt>
+              <dd class="col-sm-8">{{ 'Al día' if user['al_dia'] else 'Pendiente de pago' }}</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-7">
+        <div class="card card-shadow">
+          <div class="card-body">
+            <h3 class="mb-2">Cambiar contraseña</h3>
+            <p class="small-muted">El cambio es voluntario. Puede conservar su contraseña actual si así lo prefiere.</p>
+            <form method="post">
+              <div class="mb-3">
+                <label class="form-label">Contraseña actual</label>
+                <input type="password" name="password_actual" class="form-control" required autocomplete="current-password">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Nueva contraseña</label>
+                <input type="password" name="password_nueva" class="form-control" required minlength="6" autocomplete="new-password">
+                <div class="form-text">Mínimo 6 caracteres.</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Confirmar nueva contraseña</label>
+                <input type="password" name="password_confirmar" class="form-control" required minlength="6" autocomplete="new-password">
+              </div>
+              <button class="btn btn-primary">Guardar nueva contraseña</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return render_page(content, title="Mi cuenta", user=user)
 
 
 # =========================
@@ -1573,39 +1672,60 @@ def admin_users():
 
         if not all([username, password, nombre, propiedad]):
             flash("Todos los campos principales son obligatorios.", "danger")
+        elif rol not in ("admin", "residente"):
+            flash("El rol seleccionado no es válido.", "danger")
         else:
             try:
                 db.execute(
                     """
-                    INSERT INTO users (username, password, nombre, propiedad, rol, activo, al_dia, residente_permanente)
+                    INSERT INTO users
+                    (username, password, nombre, propiedad, rol, activo, al_dia, residente_permanente)
                     VALUES (?, ?, ?, ?, ?, 1, ?, ?)
                     """,
-                    (username, password, nombre, propiedad, rol, al_dia, residente_permanente),
+                    (username, hash_password(password), nombre, propiedad, rol, al_dia, residente_permanente),
                 )
                 db.commit()
                 flash("Usuario creado correctamente.", "success")
                 return redirect(url_for("admin_users"))
-            except sqlite3.IntegrityError:
-                flash("El usuario ya existe.", "danger")
+            except psycopg.IntegrityError:
+                db.rollback()
+                flash("No fue posible crear el usuario. Verifique que el nombre de usuario no esté repetido.", "danger")
 
-    users = db.execute("SELECT * FROM users ORDER BY rol DESC, propiedad ASC, nombre ASC").fetchall()
+    q = request.args.get("q", "").strip()
+    estado = request.args.get("estado", "").strip()
+
+    query = "SELECT * FROM users WHERE 1=1"
+    params = []
+    if q:
+        query += " AND (LOWER(username) LIKE LOWER(?) OR LOWER(nombre) LIKE LOWER(?) OR LOWER(propiedad) LIKE LOWER(?))"
+        criterio = f"%{q}%"
+        params.extend([criterio, criterio, criterio])
+    if estado == "activos":
+        query += " AND activo = 1"
+    elif estado == "inactivos":
+        query += " AND activo = 0"
+    elif estado == "morosos":
+        query += " AND al_dia = 0"
+
+    query += " ORDER BY rol DESC, propiedad ASC, nombre ASC"
+    users = db.execute(query, params).fetchall()
 
     content = """
     <div class="row g-4">
-      <div class="col-lg-4">
+      <div class="col-xl-4">
         <div class="card card-shadow">
           <div class="card-body">
             <h4>Nuevo usuario</h4>
             <form method="post">
               <div class="mb-2"><label class="form-label">Usuario</label><input name="username" class="form-control" required></div>
-              <div class="mb-2"><label class="form-label">Contraseña</label><input name="password" class="form-control" required></div>
+              <div class="mb-2"><label class="form-label">Contraseña inicial</label><input name="password" type="password" class="form-control" required></div>
               <div class="mb-2"><label class="form-label">Nombre</label><input name="nombre" class="form-control" required></div>
-              <div class="mb-2"><label class="form-label">Propiedad</label><input name="propiedad" class="form-control" placeholder="Casa 01 / Lote 12" required></div>
+              <div class="mb-2"><label class="form-label">Propiedad</label><input name="propiedad" class="form-control" placeholder="Lote 12" required></div>
               <div class="mb-2">
                 <label class="form-label">Rol</label>
                 <select name="rol" class="form-select">
                   <option value="residente">Residente</option>
-                  <option value="admin">Admin</option>
+                  <option value="admin">Administrador</option>
                 </select>
               </div>
               <div class="form-check">
@@ -1623,14 +1743,38 @@ def admin_users():
         </div>
       </div>
 
-      <div class="col-lg-8">
+      <div class="col-xl-8">
         <div class="card card-shadow">
           <div class="card-body">
-            <h4>Usuarios</h4>
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+              <h4 class="mb-0">Usuarios</h4>
+              <span class="badge text-bg-secondary">{{ users|length }} resultado(s)</span>
+            </div>
+
+            <form method="get" class="row g-2 mb-3">
+              <div class="col-md-7">
+                <input name="q" class="form-control" value="{{ q }}" placeholder="Buscar por usuario, nombre o lote">
+              </div>
+              <div class="col-md-3">
+                <select name="estado" class="form-select">
+                  <option value="">Todos</option>
+                  <option value="activos" {{ 'selected' if estado == 'activos' else '' }}>Activos</option>
+                  <option value="inactivos" {{ 'selected' if estado == 'inactivos' else '' }}>Inactivos</option>
+                  <option value="morosos" {{ 'selected' if estado == 'morosos' else '' }}>No están al día</option>
+                </select>
+              </div>
+              <div class="col-md-2 d-grid">
+                <button class="btn btn-dark">Buscar</button>
+              </div>
+            </form>
+
             <div class="table-responsive">
               <table class="table table-striped">
                 <thead>
-                  <tr><th>Usuario</th><th>Nombre</th><th>Propiedad</th><th>Rol</th><th>Al día</th><th>Permanente</th></tr>
+                  <tr>
+                    <th>Usuario</th><th>Nombre</th><th>Propiedad</th><th>Rol</th>
+                    <th>Al día</th><th>Activo</th><th>Acciones</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {% for u in users %}
@@ -1639,11 +1783,24 @@ def admin_users():
                       <td>{{ u['nombre'] }}</td>
                       <td>{{ u['propiedad'] }}</td>
                       <td>{{ u['rol'] }}</td>
-                      <td>{{ 'Sí' if u['al_dia'] else 'No' }}</td>
-                      <td>{{ 'Sí' if u['residente_permanente'] else 'No' }}</td>
+                      <td><span class="badge text-bg-{{ 'success' if u['al_dia'] else 'danger' }}">{{ 'Sí' if u['al_dia'] else 'No' }}</span></td>
+                      <td><span class="badge text-bg-{{ 'success' if u['activo'] else 'secondary' }}">{{ 'Activo' if u['activo'] else 'Inactivo' }}</span></td>
+                      <td>
+                        <div class="d-flex gap-1 flex-wrap">
+                          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_editar_usuario', user_id=u['id']) }}">Editar</a>
+                          <a class="btn btn-sm btn-outline-warning" href="{{ url_for('admin_restablecer_password', user_id=u['id']) }}">Restablecer contraseña</a>
+                          {% if u['id'] != session.get('user_id') %}
+                            <form method="post" action="{{ url_for('admin_toggle_usuario', user_id=u['id']) }}" class="d-inline">
+                              <button class="btn btn-sm btn-outline-{{ 'secondary' if u['activo'] else 'success' }}" onclick="return confirm('¿Confirmar cambio de estado del usuario?')">
+                                {{ 'Desactivar' if u['activo'] else 'Activar' }}
+                              </button>
+                            </form>
+                          {% endif %}
+                        </div>
+                      </td>
                     </tr>
                   {% else %}
-                    <tr><td colspan="6" class="text-center text-muted">No hay usuarios.</td></tr>
+                    <tr><td colspan="7" class="text-center text-muted">No se encontraron usuarios.</td></tr>
                   {% endfor %}
                 </tbody>
               </table>
@@ -1653,7 +1810,164 @@ def admin_users():
       </div>
     </div>
     """
-    return render_page(content, title="Usuarios", users=users)
+    return render_page(content, title="Usuarios", users=users, q=q, estado=estado)
+
+
+@app.route("/admin/users/<int:user_id>/editar", methods=["GET", "POST"])
+@admin_required
+def admin_editar_usuario(user_id: int):
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        abort(404)
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        nombre = request.form.get("nombre", "").strip()
+        propiedad = request.form.get("propiedad", "").strip()
+        rol = request.form.get("rol", "residente").strip()
+        al_dia = 1 if request.form.get("al_dia") == "on" else 0
+        residente_permanente = 1 if request.form.get("residente_permanente") == "on" else 0
+
+        if not all([username, nombre, propiedad]):
+            flash("Usuario, nombre y propiedad son obligatorios.", "danger")
+        elif rol not in ("admin", "residente"):
+            flash("El rol seleccionado no es válido.", "danger")
+        else:
+            try:
+                db.execute(
+                    """
+                    UPDATE users
+                    SET username = ?, nombre = ?, propiedad = ?, rol = ?,
+                        al_dia = ?, residente_permanente = ?
+                    WHERE id = ?
+                    """,
+                    (username, nombre, propiedad, rol, al_dia, residente_permanente, user_id),
+                )
+                db.commit()
+                if user_id == session.get("user_id"):
+                    session["nombre"] = nombre
+                    session["rol"] = rol
+                flash("Usuario actualizado correctamente.", "success")
+                return redirect(url_for("admin_users"))
+            except psycopg.IntegrityError:
+                db.rollback()
+                flash("El nombre de usuario ya está asignado a otra cuenta.", "danger")
+
+    content = """
+    <div class="row justify-content-center">
+      <div class="col-lg-7">
+        <div class="card card-shadow">
+          <div class="card-body">
+            <h3>Editar usuario</h3>
+            <form method="post">
+              <div class="mb-3"><label class="form-label">Usuario</label><input name="username" class="form-control" value="{{ user['username'] }}" required></div>
+              <div class="mb-3"><label class="form-label">Nombre</label><input name="nombre" class="form-control" value="{{ user['nombre'] }}" required></div>
+              <div class="mb-3"><label class="form-label">Propiedad</label><input name="propiedad" class="form-control" value="{{ user['propiedad'] }}" required></div>
+              <div class="mb-3">
+                <label class="form-label">Rol</label>
+                <select name="rol" class="form-select">
+                  <option value="residente" {{ 'selected' if user['rol'] == 'residente' else '' }}>Residente</option>
+                  <option value="admin" {{ 'selected' if user['rol'] == 'admin' else '' }}>Administrador</option>
+                </select>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="al_dia" id="edit_al_dia" {{ 'checked' if user['al_dia'] else '' }}>
+                <label class="form-check-label" for="edit_al_dia">Al día en administración</label>
+              </div>
+              <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" name="residente_permanente" id="edit_permanente" {{ 'checked' if user['residente_permanente'] else '' }}>
+                <label class="form-check-label" for="edit_permanente">Residente permanente</label>
+              </div>
+              <button class="btn btn-primary">Guardar cambios</button>
+              <a class="btn btn-outline-secondary" href="{{ url_for('admin_users') }}">Cancelar</a>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return render_page(content, title="Editar usuario", user=user)
+
+
+@app.route("/admin/users/<int:user_id>/restablecer-password", methods=["GET", "POST"])
+@admin_required
+def admin_restablecer_password(user_id: int):
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        abort(404)
+
+    if request.method == "POST":
+        nueva = request.form.get("password_nueva", "").strip()
+        confirmar = request.form.get("password_confirmar", "").strip()
+
+        if len(nueva) < 6:
+            flash("La contraseña temporal debe tener mínimo 6 caracteres.", "warning")
+        elif nueva != confirmar:
+            flash("La confirmación no coincide.", "danger")
+        else:
+            db.execute(
+                "UPDATE users SET password = ? WHERE id = ?",
+                (hash_password(nueva), user_id),
+            )
+            db.commit()
+            flash(f"Contraseña restablecida para {user['username']}.", "success")
+            return redirect(url_for("admin_users"))
+
+    content = """
+    <div class="row justify-content-center">
+      <div class="col-lg-6">
+        <div class="card card-shadow">
+          <div class="card-body">
+            <h3>Restablecer contraseña</h3>
+            <p class="small-muted">
+              Usuario: <strong>{{ user['username'] }}</strong><br>
+              Propietario: {{ user['nombre'] }} — {{ user['propiedad'] }}
+            </p>
+            <div class="alert alert-warning">
+              La contraseña actual no se muestra. Solo será reemplazada por una nueva.
+            </div>
+            <form method="post">
+              <div class="mb-3">
+                <label class="form-label">Nueva contraseña temporal</label>
+                <input type="password" name="password_nueva" class="form-control" required minlength="6">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Confirmar contraseña</label>
+                <input type="password" name="password_confirmar" class="form-control" required minlength="6">
+              </div>
+              <button class="btn btn-warning">Restablecer contraseña</button>
+              <a class="btn btn-outline-secondary" href="{{ url_for('admin_users') }}">Cancelar</a>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return render_page(content, title="Restablecer contraseña", user=user)
+
+
+@app.route("/admin/users/<int:user_id>/toggle", methods=["POST"])
+@admin_required
+def admin_toggle_usuario(user_id: int):
+    if user_id == session.get("user_id"):
+        flash("No puede desactivar su propia cuenta.", "warning")
+        return redirect(url_for("admin_users"))
+
+    db = get_db()
+    user = db.execute("SELECT id, activo, username FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        abort(404)
+
+    nuevo_estado = 0 if int(user["activo"]) == 1 else 1
+    db.execute("UPDATE users SET activo = ? WHERE id = ?", (nuevo_estado, user_id))
+    db.commit()
+    flash(
+        f"Usuario {user['username']} {'activado' if nuevo_estado else 'desactivado'}.",
+        "success" if nuevo_estado else "warning",
+    )
+    return redirect(url_for("admin_users"))
 
 
 @app.route("/admin/blocks", methods=["GET", "POST"])
@@ -1678,7 +1992,8 @@ def admin_blocks():
                 db.commit()
                 flash("Fecha bloqueada correctamente.", "success")
                 return redirect(url_for("admin_blocks"))
-            except sqlite3.IntegrityError:
+            except psycopg.IntegrityError:
+                db.rollback()
                 flash("Esa fecha ya se encuentra bloqueada para ese recurso.", "warning")
 
     blocks = db.execute(
@@ -1808,4 +2123,4 @@ def admin_config():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1")
