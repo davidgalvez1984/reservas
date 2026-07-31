@@ -196,9 +196,14 @@ def init_db() -> None:
                     motivo_rechazo TEXT DEFAULT '',
                     nota_admin TEXT DEFAULT '',
                     created_at TEXT NOT NULL,
-                    updated_at TEXT DEFAULT ''
+                    updated_at TEXT DEFAULT '',
+                    solicitud_extra INTEGER NOT NULL DEFAULT 0
                 );
                 """
+            )
+
+            cur.execute(
+                "ALTER TABLE reservations ADD COLUMN IF NOT EXISTS solicitud_extra INTEGER NOT NULL DEFAULT 0"
             )
 
             cur.execute("SELECT COUNT(*) FROM resources")
@@ -397,15 +402,26 @@ def is_blocked(resource_id: int, fecha: str) -> Optional[str]:
     return row["motivo"] if row else None
 
 
-def create_reservation_record(user_id: int, resource_id: int, fecha: str, hora_inicio: str, hora_fin: str,
-                              asistentes: int, invitados: str, estado: str, observaciones: str) -> None:
+def create_reservation_record(
+    user_id: int,
+    resource_id: int,
+    fecha: str,
+    hora_inicio: str,
+    hora_fin: str,
+    asistentes: int,
+    invitados: str,
+    estado: str,
+    observaciones: str,
+    solicitud_extra: int = 0,
+) -> None:
     db = get_db()
     db.execute(
         """
         INSERT INTO reservations
         (user_id, resource_id, fecha, hora_inicio, hora_fin, asistentes,
-         invitados_registrados, estado, observaciones, motivo_rechazo, nota_admin, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?)
+         invitados_registrados, estado, observaciones, motivo_rechazo, nota_admin,
+         created_at, updated_at, solicitud_extra)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?)
         """,
         (
             user_id,
@@ -419,9 +435,11 @@ def create_reservation_record(user_id: int, resource_id: int, fecha: str, hora_i
             observaciones,
             datetime.now().isoformat(timespec="seconds"),
             datetime.now().isoformat(timespec="seconds"),
+            solicitud_extra,
         ),
     )
     db.commit()
+
 
 
 def update_reservation_record(reservation_id: int, fecha: str, hora_inicio: str, hora_fin: str,
@@ -458,6 +476,33 @@ def update_reservation_record(reservation_id: int, fecha: str, hora_inicio: str,
     db.commit()
 
 
+def monthly_permission_summary(user_id: int, fecha: Optional[date] = None):
+    fecha = fecha or date.today()
+    salon = resource_by_codigo("SALON")
+    piscina = resource_by_codigo("PISCINA")
+
+    salon_limite = int(get_config("max_reservas_salon_mes", "2"))
+    piscina_limite = int(get_config("max_reservas_piscina_mes", "8"))
+
+    salon_usadas = count_user_reservations_month(user_id, salon["id"], fecha) if salon else 0
+    piscina_usadas = count_user_reservations_month(user_id, piscina["id"], fecha) if piscina else 0
+
+    return {
+        "salon": {
+            "usadas": salon_usadas,
+            "limite": salon_limite,
+            "disponibles": max(0, salon_limite - salon_usadas),
+        },
+        "piscina": {
+            "usadas": piscina_usadas,
+            "limite": piscina_limite,
+            "disponibles": max(0, piscina_limite - piscina_usadas),
+        },
+        "mes": pycalendar.month_name[fecha.month],
+        "year": fecha.year,
+    }
+
+
 def reservation_status_badge(estado: str) -> str:
     mapping = {
         "aprobada": "success",
@@ -469,8 +514,16 @@ def reservation_status_badge(estado: str) -> str:
     return mapping.get(estado, "secondary")
 
 
-def validate_reservation_rules(user_row, resource_row, fecha_str: str, hora_inicio_str: str, hora_fin_str: str,
-                               asistentes: int, exclude_id: Optional[int] = None):
+def validate_reservation_rules(
+    user_row,
+    resource_row,
+    fecha_str: str,
+    hora_inicio_str: str,
+    hora_fin_str: str,
+    asistentes: int,
+    exclude_id: Optional[int] = None,
+    permitir_solicitud_extra: bool = False,
+):
     try:
         fecha = parse_fecha(fecha_str)
         datetime.strptime(hora_inicio_str, "%H:%M")
@@ -512,8 +565,11 @@ def validate_reservation_rules(user_row, resource_row, fecha_str: str, hora_inic
 
         limite_mes = int(get_config("max_reservas_salon_mes", "2"))
         usadas = count_user_reservations_month(user_row["id"], resource_row["id"], fecha, exclude_id)
-        if usadas >= limite_mes and user_row["rol"] != "admin":
-            return False, f"Ya alcanzó el límite mensual de {limite_mes} reservas para el salón."
+        if usadas >= limite_mes and user_row["rol"] != "admin" and not permitir_solicitud_extra:
+            return False, (
+                f"Ya alcanzó el límite mensual de {limite_mes} reservas para el salón. "
+                "Puede marcar la opción de solicitud adicional para que la administración evalúe una excepción."
+            )
 
     elif resource_row["codigo"] == "PISCINA":
         dia_cierre = int(get_config("dia_cierre_piscina", "1"))
@@ -529,13 +585,22 @@ def validate_reservation_rules(user_row, resource_row, fecha_str: str, hora_inic
 
         limite_mes = int(get_config("max_reservas_piscina_mes", "8"))
         usadas = count_user_reservations_month(user_row["id"], resource_row["id"], fecha, exclude_id)
-        if usadas >= limite_mes and user_row["rol"] != "admin":
-            return False, f"Ya alcanzó el límite mensual de {limite_mes} reservas para la piscina."
+        if usadas >= limite_mes and user_row["rol"] != "admin" and not permitir_solicitud_extra:
+            return False, (
+                f"Ya alcanzó el límite mensual de {limite_mes} reservas para la piscina. "
+                "Puede marcar la opción de solicitud adicional para que la administración evalúe una excepción."
+            )
 
     return True, "Validación superada."
 
 
-def get_calendar_month_data(year: int, month: int, is_admin: bool):
+
+def get_calendar_month_data(
+    year: int,
+    month: int,
+    is_admin: bool,
+    viewer_user_id: Optional[int] = None,
+):
     db = get_db()
     cal = pycalendar.Calendar(firstweekday=0)
     days = list(cal.itermonthdates(year, month))
@@ -544,12 +609,13 @@ def get_calendar_month_data(year: int, month: int, is_admin: bool):
 
     rows = db.execute(
         """
-        SELECT r.*, rs.nombre AS recurso, rs.codigo AS recurso_codigo, u.propiedad, u.nombre
+        SELECT r.*, rs.nombre AS recurso, rs.codigo AS recurso_codigo,
+               u.propiedad, u.nombre, u.username
         FROM reservations r
         JOIN resources rs ON rs.id = r.resource_id
         JOIN users u ON u.id = r.user_id
         WHERE r.fecha >= ? AND r.fecha <= ?
-          AND r.estado IN ('pendiente', 'aprobada', 'requiere_ajuste')
+          AND r.estado IN ('pendiente', 'aprobada', 'requiere_ajuste', 'cancelada')
         ORDER BY r.fecha ASC, r.hora_inicio ASC
         """,
         (inicio.isoformat(), fin.isoformat()),
@@ -567,16 +633,41 @@ def get_calendar_month_data(year: int, month: int, is_admin: bool):
 
     reservations_by_day = {}
     for r in rows:
-        key = r["fecha"]
-        reservations_by_day.setdefault(key, []).append({
-            "texto": f'{r["recurso"]}: {r["hora_inicio"]}-{r["hora_fin"]} - Reservado',
-            "detalle": f'({r["propiedad"]})' if is_admin else "",
+        is_own = viewer_user_id is not None and int(r["user_id"]) == int(viewer_user_id)
+        if is_admin:
+            texto = (
+                f'{r["recurso"]} · {r["hora_inicio"]}-{r["hora_fin"]} · '
+                f'{r["nombre"]} ({display_property(r["propiedad"])})'
+            )
+        elif is_own:
+            texto = f'{r["recurso"]} · {r["hora_inicio"]}-{r["hora_fin"]} · {r["estado"].replace("_", " ").title()}'
+        else:
+            texto = f'{r["recurso"]} · {r["hora_inicio"]}-{r["hora_fin"]} · Reservado'
+
+        item = {
+            "id": r["id"],
+            "texto": texto,
             "estado": r["estado"],
-        })
+            "is_own": is_own,
+            "recurso": r["recurso"],
+            "fecha": r["fecha"],
+            "hora_inicio": r["hora_inicio"],
+            "hora_fin": r["hora_fin"],
+            "asistentes": r["asistentes"],
+            "nombre": r["nombre"] if is_admin else "",
+            "propiedad": display_property(r["propiedad"]) if is_admin else "",
+            "username": r["username"] if is_admin else "",
+            "nota_admin": r["nota_admin"] or "",
+            "observaciones": r["observaciones"] or "",
+            "solicitud_extra": int(r["solicitud_extra"] or 0),
+        }
+        reservations_by_day.setdefault(r["fecha"], []).append(item)
 
     blocked_by_day = {}
     for b in bloqueos:
-        blocked_by_day.setdefault(b["fecha"], []).append(f'{b["recurso"]}: {b["motivo"] or "Bloqueado"}')
+        blocked_by_day.setdefault(b["fecha"], []).append(
+            f'{b["recurso"]}: {b["motivo"] or "Bloqueado"}'
+        )
 
     weeks = []
     week = []
@@ -614,9 +705,17 @@ BASE_HTML = """
     .day-box { font-size: .82rem; }
     .day-num { font-weight: 700; margin-bottom: .25rem; }
     .muted-day { background: #f1f3f5 !important; color: #adb5bd; }
-    .event-pill { font-size: .74rem; padding: .2rem .4rem; border-radius: .5rem; display: block; margin-bottom: .25rem; }
-    .event-booked { background: #e9ecef; }
+    .event-pill { font-size: .74rem; padding: .28rem .45rem; border-radius: .5rem; display: block; margin-bottom: .28rem; border: 0; width: 100%; text-align: left; cursor: pointer; }
+    .event-pill:hover { filter: brightness(.97); transform: translateY(-1px); }
+    .event-pendiente { background: #fff3cd; color: #664d03; }
+    .event-aprobada { background: #d1e7dd; color: #0f5132; }
+    .event-requiere_ajuste { background: #cff4fc; color: #055160; }
+    .event-cancelada { background: #e2e3e5; color: #41464b; }
+    .event-reservado { background: #e9ecef; color: #343a40; }
     .event-block { background: #ffe3e3; color: #842029; }
+    .permission-card .display-6 { font-weight: 700; }
+    .calendar-legend span { display: inline-flex; align-items: center; gap: .3rem; margin-right: .8rem; font-size: .85rem; }
+    .legend-dot { width: .8rem; height: .8rem; border-radius: 50%; display: inline-block; }
     .top-actions a { text-decoration: none; }
   </style>
 </head>
@@ -825,7 +924,12 @@ def user_calendar():
     today = date.today()
     year = int(request.args.get("year", today.year))
     month = int(request.args.get("month", today.month))
-    weeks = get_calendar_month_data(year, month, is_admin=False)
+    weeks = get_calendar_month_data(
+        year,
+        month,
+        is_admin=False,
+        viewer_user_id=session["user_id"],
+    )
 
     prev_month = month - 1 or 12
     prev_year = year - 1 if month == 1 else year
@@ -833,15 +937,24 @@ def user_calendar():
     next_year = year + 1 if month == 12 else year
 
     content = """
-    <div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
       <div>
         <h2 class="mb-1">Calendario de disponibilidad</h2>
-        <div class="small-muted">Se muestra únicamente “Reservado” y el horario ocupado.</div>
+        <div class="small-muted">
+          Sus reservas aparecen con su estado. Las reservas de otros usuarios solo se muestran como “Reservado”.
+        </div>
       </div>
       <div class="d-flex gap-2">
         <a class="btn btn-outline-secondary" href="{{ url_for('user_calendar', year=prev_year, month=prev_month) }}">Mes anterior</a>
         <a class="btn btn-outline-secondary" href="{{ url_for('user_calendar', year=next_year, month=next_month) }}">Mes siguiente</a>
       </div>
+    </div>
+
+    <div class="calendar-legend mb-3">
+      <span><i class="legend-dot bg-warning"></i>Pendiente</span>
+      <span><i class="legend-dot bg-success"></i>Aprobada</span>
+      <span><i class="legend-dot bg-info"></i>Requiere ajuste</span>
+      <span><i class="legend-dot bg-secondary"></i>Reservado por otro usuario</span>
     </div>
 
     <div class="card card-shadow mb-3">
@@ -865,7 +978,21 @@ def user_calendar():
                           <span class="event-pill event-block">{{ b }}</span>
                         {% endfor %}
                         {% for r in day.reservations %}
-                          <span class="event-pill event-booked">{{ r.texto }}</span>
+                          {% if r.is_own %}
+                            <button
+                              type="button"
+                              class="event-pill event-{{ r.estado }}"
+                              onclick='openUserReservation({{ r|tojson }})'>
+                              {{ r.texto }}
+                            </button>
+                          {% else %}
+                            <button
+                              type="button"
+                              class="event-pill event-reservado"
+                              onclick='openOccupiedSlot({{ r.recurso|tojson }}, {{ r.fecha|tojson }}, {{ r.hora_inicio|tojson }}, {{ r.hora_fin|tojson }})'>
+                              {{ r.texto }}
+                            </button>
+                          {% endif %}
                         {% endfor %}
                       </div>
                     </td>
@@ -877,6 +1004,70 @@ def user_calendar():
         </div>
       </div>
     </div>
+
+    <div class="modal fade" id="reservationModal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="reservationModalTitle">Reserva</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body" id="reservationModalBody"></div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      function escapeHtml(value) {
+        return String(value ?? '')
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+
+      function openUserReservation(r) {
+        document.getElementById('reservationModalTitle').textContent = 'Mi reserva';
+        document.getElementById('reservationModalBody').innerHTML = `
+          <dl class="row mb-0">
+            <dt class="col-5">Espacio</dt><dd class="col-7">${escapeHtml(r.recurso)}</dd>
+            <dt class="col-5">Fecha</dt><dd class="col-7">${escapeHtml(r.fecha)}</dd>
+            <dt class="col-5">Horario</dt><dd class="col-7">${escapeHtml(r.hora_inicio)} - ${escapeHtml(r.hora_fin)}</dd>
+            <dt class="col-5">Estado</dt><dd class="col-7"><span class="badge text-bg-${statusColor(r.estado)}">${escapeHtml(formatStatus(r.estado))}</span></dd>
+            <dt class="col-5">Observación admin</dt><dd class="col-7">${escapeHtml(r.nota_admin || 'Sin observaciones')}</dd>
+            <dt class="col-5">Solicitud adicional</dt><dd class="col-7">${r.solicitud_extra ? 'Sí, sujeta a autorización' : 'No'}</dd>
+          </dl>`;
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('reservationModal')).show();
+      }
+
+      function openOccupiedSlot(recurso, fecha, inicio, fin) {
+        document.getElementById('reservationModalTitle').textContent = 'Horario reservado';
+        document.getElementById('reservationModalBody').innerHTML = `
+          <p class="mb-2"><strong>${escapeHtml(recurso)}</strong></p>
+          <p class="mb-1">${escapeHtml(fecha)}</p>
+          <p class="mb-0">${escapeHtml(inicio)} - ${escapeHtml(fin)}</p>
+          <div class="alert alert-secondary mt-3 mb-0">Este horario está reservado. Por privacidad no se muestran datos del propietario.</div>`;
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('reservationModal')).show();
+      }
+
+      function formatStatus(status) {
+        return String(status).replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+      }
+
+      function statusColor(status) {
+        return {
+          aprobada: 'success',
+          pendiente: 'warning',
+          requiere_ajuste: 'info',
+          cancelada: 'secondary',
+          rechazada: 'danger'
+        }[status] || 'secondary';
+      }
+    </script>
     """
     return render_page(
         content,
@@ -904,17 +1095,25 @@ def admin_calendar():
     prev_year = year - 1 if month == 1 else year
     next_month = month + 1 if month < 12 else 1
     next_year = year + 1 if month == 12 else year
+    return_url = url_for("admin_calendar", year=year, month=month)
 
     content = """
-    <div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
       <div>
         <h2 class="mb-1">Calendario administrativo</h2>
-        <div class="small-muted">Aquí sí se visualiza qué propiedad tiene cada reserva.</div>
+        <div class="small-muted">Seleccione una reserva para consultar detalles y gestionar su estado sin salir del calendario.</div>
       </div>
       <div class="d-flex gap-2">
         <a class="btn btn-outline-secondary" href="{{ url_for('admin_calendar', year=prev_year, month=prev_month) }}">Mes anterior</a>
         <a class="btn btn-outline-secondary" href="{{ url_for('admin_calendar', year=next_year, month=next_month) }}">Mes siguiente</a>
       </div>
+    </div>
+
+    <div class="calendar-legend mb-3">
+      <span><i class="legend-dot bg-warning"></i>Pendiente</span>
+      <span><i class="legend-dot bg-success"></i>Aprobada</span>
+      <span><i class="legend-dot bg-info"></i>Requiere ajuste</span>
+      <span><i class="legend-dot bg-secondary"></i>Cancelada</span>
     </div>
 
     <div class="card card-shadow mb-3">
@@ -938,7 +1137,12 @@ def admin_calendar():
                           <span class="event-pill event-block">{{ b }}</span>
                         {% endfor %}
                         {% for r in day.reservations %}
-                          <span class="event-pill event-booked">{{ r.texto }} {{ r.detalle }}</span>
+                          <button
+                            type="button"
+                            class="event-pill event-{{ r.estado }}"
+                            onclick='openAdminReservation({{ r|tojson }})'>
+                            {{ r.texto }}
+                          </button>
                         {% endfor %}
                       </div>
                     </td>
@@ -950,6 +1154,103 @@ def admin_calendar():
         </div>
       </div>
     </div>
+
+    <div class="modal fade" id="adminReservationModal" tabindex="-1">
+      <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Detalle y gestión de reserva</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div id="adminReservationDetails"></div>
+            <hr>
+            <form method="post" id="quickAdjustForm">
+              <input type="hidden" name="next" value="{{ return_url }}">
+              <label class="form-label"><strong>Solicitar ajuste</strong></label>
+              <textarea name="nota_admin" class="form-control" rows="3" required placeholder="Indique claramente el ajuste que debe realizar el usuario."></textarea>
+              <button class="btn btn-info mt-2">Enviar solicitud de ajuste</button>
+            </form>
+          </div>
+          <div class="modal-footer justify-content-between">
+            <div class="d-flex gap-2 flex-wrap" id="adminActionButtons"></div>
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const calendarReturnUrl = {{ return_url|tojson }};
+
+      function escapeHtml(value) {
+        return String(value ?? '')
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+
+      function formatStatus(status) {
+        return String(status).replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+      }
+
+      function statusColor(status) {
+        return {
+          aprobada: 'success',
+          pendiente: 'warning',
+          requiere_ajuste: 'info',
+          cancelada: 'secondary',
+          rechazada: 'danger'
+        }[status] || 'secondary';
+      }
+
+      function openAdminReservation(r) {
+        document.getElementById('adminReservationDetails').innerHTML = `
+          <div class="row g-3">
+            <div class="col-md-6">
+              <dl class="row mb-0">
+                <dt class="col-5">Usuario</dt><dd class="col-7">${escapeHtml(r.username)}</dd>
+                <dt class="col-5">Propietario</dt><dd class="col-7">${escapeHtml(r.nombre)}</dd>
+                <dt class="col-5">Propiedad</dt><dd class="col-7">${escapeHtml(r.propiedad)}</dd>
+                <dt class="col-5">Espacio</dt><dd class="col-7">${escapeHtml(r.recurso)}</dd>
+              </dl>
+            </div>
+            <div class="col-md-6">
+              <dl class="row mb-0">
+                <dt class="col-5">Fecha</dt><dd class="col-7">${escapeHtml(r.fecha)}</dd>
+                <dt class="col-5">Horario</dt><dd class="col-7">${escapeHtml(r.hora_inicio)} - ${escapeHtml(r.hora_fin)}</dd>
+                <dt class="col-5">Asistentes</dt><dd class="col-7">${escapeHtml(r.asistentes)}</dd>
+                <dt class="col-5">Estado</dt><dd class="col-7"><span class="badge text-bg-${statusColor(r.estado)}">${escapeHtml(formatStatus(r.estado))}</span></dd>
+                <dt class="col-5">Solicitud adicional</dt><dd class="col-7">${r.solicitud_extra ? '<span class="badge text-bg-warning">Sí</span>' : 'No'}</dd>
+              </dl>
+            </div>
+          </div>
+          <div class="mt-3">
+            <strong>Observaciones del usuario</strong>
+            <div class="border rounded p-2 mt-1">${escapeHtml(r.observaciones || 'Sin observaciones')}</div>
+          </div>
+          <div class="mt-3">
+            <strong>Nota administrativa</strong>
+            <div class="border rounded p-2 mt-1">${escapeHtml(r.nota_admin || 'Sin observaciones')}</div>
+          </div>`;
+
+        const nextParam = encodeURIComponent(calendarReturnUrl);
+        const buttons = [];
+        if (['pendiente', 'requiere_ajuste'].includes(r.estado)) {
+          buttons.push(`<a class="btn btn-success" href="/admin/reserva/${r.id}/aprobar?next=${nextParam}">Aprobar</a>`);
+        }
+        if (r.estado !== 'cancelada') {
+          buttons.push(`<a class="btn btn-outline-secondary" href="/admin/reserva/${r.id}/cancelar?next=${nextParam}" onclick="return confirm('¿Cancelar esta reserva?')">Cancelar</a>`);
+        }
+        buttons.push(`<a class="btn btn-outline-danger" href="/admin/reserva/${r.id}/eliminar?next=${nextParam}" onclick="return confirm('¿Eliminar definitivamente esta reserva?')">Eliminar</a>`);
+        document.getElementById('adminActionButtons').innerHTML = buttons.join('');
+
+        document.getElementById('quickAdjustForm').action = `/admin/reserva/${r.id}/ajuste-rapido`;
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('adminReservationModal')).show();
+      }
+    </script>
     """
     return render_page(
         content,
@@ -962,6 +1263,7 @@ def admin_calendar():
         prev_year=prev_year,
         next_month=next_month,
         next_year=next_year,
+        return_url=return_url,
     )
 
 
@@ -982,12 +1284,13 @@ def mis_reservas():
         """,
         (session["user_id"],),
     ).fetchall()
+    permisos = monthly_permission_summary(session["user_id"])
 
     content = """
-    <div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
       <div>
         <h2 class="mb-1">Mis reservas</h2>
-        <div class="small-muted">Aquí puede consultar, editar y registrar solicitudes.</div>
+        <div class="small-muted">Consulte sus reservas y los permisos disponibles del mes.</div>
       </div>
       <div class="d-flex gap-2 flex-wrap">
         <a class="btn btn-dark" href="{{ url_for('nueva_reserva_combinada') }}">Reservar salón + piscina</a>
@@ -995,6 +1298,46 @@ def mis_reservas():
         <a class="btn btn-success" href="{{ url_for('nueva_reserva', codigo='PISCINA') }}">Reservar piscina</a>
         <a class="btn btn-outline-secondary" href="{{ url_for('user_calendar') }}">Ver calendario</a>
       </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+      <div class="col-md-6">
+        <div class="card card-shadow permission-card h-100">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start">
+              <div>
+                <h5>Salón social</h5>
+                <div class="small-muted">{{ permisos.mes }} {{ permisos.year }}</div>
+              </div>
+              <span class="badge text-bg-primary">Límite {{ permisos.salon.limite }}</span>
+            </div>
+            <div class="display-6 mt-3">{{ permisos.salon.disponibles }}</div>
+            <div>permiso(s) disponible(s)</div>
+            <div class="small-muted mt-2">Utilizados o en trámite: {{ permisos.salon.usadas }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card card-shadow permission-card h-100">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start">
+              <div>
+                <h5>Piscina</h5>
+                <div class="small-muted">{{ permisos.mes }} {{ permisos.year }}</div>
+              </div>
+              <span class="badge text-bg-success">Límite {{ permisos.piscina.limite }}</span>
+            </div>
+            <div class="display-6 mt-3">{{ permisos.piscina.disponibles }}</div>
+            <div>permiso(s) disponible(s)</div>
+            <div class="small-muted mt-2">Utilizados o en trámite: {{ permisos.piscina.usadas }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="alert alert-info">
+      Si ya agotó el límite mensual, puede enviar una <strong>solicitud adicional</strong>.
+      La administración podrá aprobarla excepcionalmente si existe disponibilidad y no afecta a otros propietarios.
     </div>
 
     <div class="card card-shadow">
@@ -1008,6 +1351,7 @@ def mis_reservas():
                 <th>Horario</th>
                 <th>Asistentes</th>
                 <th>Estado</th>
+                <th>Tipo</th>
                 <th>Nota admin</th>
                 <th>Observaciones</th>
                 <th>Acciones</th>
@@ -1020,7 +1364,14 @@ def mis_reservas():
                   <td>{{ r['fecha'] }}</td>
                   <td>{{ r['hora_inicio'] }} - {{ r['hora_fin'] }}</td>
                   <td>{{ r['asistentes'] }}</td>
-                  <td><span class="badge text-bg-{{ reservation_status_badge(r['estado']) }}">{{ r['estado'] }}</span></td>
+                  <td><span class="badge text-bg-{{ reservation_status_badge(r['estado']) }}">{{ r['estado'].replace('_', ' ') }}</span></td>
+                  <td>
+                    {% if r['solicitud_extra'] %}
+                      <span class="badge text-bg-warning">Adicional</span>
+                    {% else %}
+                      <span class="badge text-bg-light">Ordinaria</span>
+                    {% endif %}
+                  </td>
                   <td>{{ r['nota_admin'] or '' }}</td>
                   <td>{{ r['observaciones'] or '' }}</td>
                   <td>
@@ -1032,7 +1383,7 @@ def mis_reservas():
                   </td>
                 </tr>
               {% else %}
-                <tr><td colspan="8" class="text-center text-muted">No hay reservas registradas.</td></tr>
+                <tr><td colspan="9" class="text-center text-muted">No hay reservas registradas.</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -1040,7 +1391,13 @@ def mis_reservas():
       </div>
     </div>
     """
-    return render_page(content, title="Mis reservas", reservas=reservas, reservation_status_badge=reservation_status_badge)
+    return render_page(
+        content,
+        title="Mis reservas",
+        reservas=reservas,
+        permisos=permisos,
+        reservation_status_badge=reservation_status_badge,
+    )
 
 
 @app.route("/nueva-reserva/<codigo>", methods=["GET", "POST"])
@@ -1058,17 +1415,45 @@ def nueva_reserva(codigo: str):
         asistentes = int(request.form.get("asistentes", "1"))
         invitados = request.form.get("invitados_registrados", "").strip()
         observaciones = request.form.get("observaciones", "").strip()
+        solicitar_extra = request.form.get("solicitar_extra") == "on"
 
-        ok, mensaje = validate_reservation_rules(user, recurso, fecha, hora_inicio, hora_fin, asistentes)
+        ok, mensaje = validate_reservation_rules(
+            user,
+            recurso,
+            fecha,
+            hora_inicio,
+            hora_fin,
+            asistentes,
+            permitir_solicitud_extra=solicitar_extra,
+        )
         if not ok:
             flash(mensaje, "danger")
         else:
-            estado = "aprobada" if (
-                recurso["codigo"] == "SALON" and get_config("auto_aprobar_salon", "0") == "1"
-            ) or (
-                recurso["codigo"] == "PISCINA" and get_config("auto_aprobar_piscina", "1") == "1"
-            ) else "pendiente"
-            create_reservation_record(user["id"], recurso["id"], fecha, hora_inicio, hora_fin, asistentes, invitados, estado, observaciones)
+            fecha_obj = parse_fecha(fecha)
+            limite_clave = "max_reservas_salon_mes" if recurso["codigo"] == "SALON" else "max_reservas_piscina_mes"
+            limite_mes = int(get_config(limite_clave, "2" if recurso["codigo"] == "SALON" else "8"))
+            usadas = count_user_reservations_month(user["id"], recurso["id"], fecha_obj)
+            es_extra = solicitar_extra and usadas >= limite_mes
+
+            estado = "pendiente" if es_extra else (
+                "aprobada" if (
+                    recurso["codigo"] == "SALON" and get_config("auto_aprobar_salon", "0") == "1"
+                ) or (
+                    recurso["codigo"] == "PISCINA" and get_config("auto_aprobar_piscina", "1") == "1"
+                ) else "pendiente"
+            )
+            create_reservation_record(
+                user["id"],
+                recurso["id"],
+                fecha,
+                hora_inicio,
+                hora_fin,
+                asistentes,
+                invitados,
+                estado,
+                observaciones,
+                solicitud_extra=1 if es_extra else 0,
+            )
             flash(f"Reserva registrada con estado: {estado}.", "success")
             return redirect(url_for("mis_reservas"))
 
@@ -1129,6 +1514,16 @@ def nueva_reserva(codigo: str):
                 <textarea name="observaciones" class="form-control" rows="3"></textarea>
               </div>
 
+              <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" name="solicitar_extra" id="solicitar_extra">
+                <label class="form-check-label" for="solicitar_extra">
+                  Solicitar autorización adicional si ya agoté el límite mensual
+                </label>
+                <div class="form-text">
+                  La solicitud quedará pendiente y será evaluada por la administración según la disponibilidad.
+                </div>
+              </div>
+
               <div class="d-flex gap-2">
                 <button class="btn btn-primary">Guardar solicitud</button>
                 <a class="btn btn-outline-secondary" href="{{ url_for('mis_reservas') }}">Volver</a>
@@ -1182,6 +1577,7 @@ def nueva_reserva_combinada():
 
         invitados = request.form.get("invitados_registrados", "").strip()
         observaciones = request.form.get("observaciones", "").strip()
+        solicitar_extra = request.form.get("solicitar_extra") == "on"
 
         if not reservar_salon and not reservar_piscina:
             flash("Debe seleccionar al menos un espacio para reservar.", "danger")
@@ -1189,12 +1585,18 @@ def nueva_reserva_combinada():
             errores = []
 
             if reservar_salon:
-                ok_salon, msg_salon = validate_reservation_rules(user, salon, fecha, salon_hora_inicio, salon_hora_fin, salon_asistentes)
+                ok_salon, msg_salon = validate_reservation_rules(
+                    user, salon, fecha, salon_hora_inicio, salon_hora_fin, salon_asistentes,
+                    permitir_solicitud_extra=solicitar_extra
+                )
                 if not ok_salon:
                     errores.append(f"Salón: {msg_salon}")
 
             if reservar_piscina:
-                ok_piscina, msg_piscina = validate_reservation_rules(user, piscina, fecha, piscina_hora_inicio, piscina_hora_fin, piscina_asistentes)
+                ok_piscina, msg_piscina = validate_reservation_rules(
+                    user, piscina, fecha, piscina_hora_inicio, piscina_hora_fin, piscina_asistentes,
+                    permitir_solicitud_extra=solicitar_extra
+                )
                 if not ok_piscina:
                     errores.append(f"Piscina: {msg_piscina}")
 
@@ -1202,12 +1604,31 @@ def nueva_reserva_combinada():
                 for err in errores:
                     flash(err, "danger")
             else:
+                fecha_obj = parse_fecha(fecha)
                 if reservar_salon:
-                    estado_salon = "aprobada" if get_config("auto_aprobar_salon", "0") == "1" else "pendiente"
-                    create_reservation_record(user["id"], salon["id"], fecha, salon_hora_inicio, salon_hora_fin, salon_asistentes, invitados, estado_salon, observaciones)
+                    limite_salon = int(get_config("max_reservas_salon_mes", "2"))
+                    usadas_salon = count_user_reservations_month(user["id"], salon["id"], fecha_obj)
+                    extra_salon = solicitar_extra and usadas_salon >= limite_salon
+                    estado_salon = "pendiente" if extra_salon else (
+                        "aprobada" if get_config("auto_aprobar_salon", "0") == "1" else "pendiente"
+                    )
+                    create_reservation_record(
+                        user["id"], salon["id"], fecha, salon_hora_inicio, salon_hora_fin,
+                        salon_asistentes, invitados, estado_salon, observaciones,
+                        solicitud_extra=1 if extra_salon else 0,
+                    )
                 if reservar_piscina:
-                    estado_piscina = "aprobada" if get_config("auto_aprobar_piscina", "1") == "1" else "pendiente"
-                    create_reservation_record(user["id"], piscina["id"], fecha, piscina_hora_inicio, piscina_hora_fin, piscina_asistentes, invitados, estado_piscina, observaciones)
+                    limite_piscina = int(get_config("max_reservas_piscina_mes", "8"))
+                    usadas_piscina = count_user_reservations_month(user["id"], piscina["id"], fecha_obj)
+                    extra_piscina = solicitar_extra and usadas_piscina >= limite_piscina
+                    estado_piscina = "pendiente" if extra_piscina else (
+                        "aprobada" if get_config("auto_aprobar_piscina", "1") == "1" else "pendiente"
+                    )
+                    create_reservation_record(
+                        user["id"], piscina["id"], fecha, piscina_hora_inicio, piscina_hora_fin,
+                        piscina_asistentes, invitados, estado_piscina, observaciones,
+                        solicitud_extra=1 if extra_piscina else 0,
+                    )
 
                 flash("Se registró la solicitud combinada.", "success")
                 return redirect(url_for("mis_reservas"))
@@ -1283,6 +1704,14 @@ def nueva_reserva_combinada():
               <div class="mb-3">
                 <label class="form-label">Observaciones</label>
                 <textarea name="observaciones" class="form-control" rows="3"></textarea>
+              </div>
+
+              <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" name="solicitar_extra" id="solicitar_extra_combinada">
+                <label class="form-check-label" for="solicitar_extra_combinada">
+                  Solicitar autorización adicional si ya agoté el límite mensual de alguno de los espacios
+                </label>
+                <div class="form-text">La administración evaluará la disponibilidad antes de aprobar.</div>
               </div>
 
               <div class="d-flex gap-2">
@@ -1513,7 +1942,46 @@ def admin_decision_reserva(reserva_id: int, decision: str):
         flash("Reserva aprobada.", "success")
     else:
         abort(400)
-    return redirect(url_for("admin_dashboard"))
+    destino = request.args.get("next") or request.referrer or url_for("admin_dashboard")
+    return redirect(destino)
+
+
+@app.route("/admin/reserva/<int:reserva_id>/cancelar")
+@admin_required
+def admin_cancelar_reserva(reserva_id: int):
+    db = get_db()
+    reserva = db.execute("SELECT id FROM reservations WHERE id = ?", (reserva_id,)).fetchone()
+    if not reserva:
+        abort(404)
+    db.execute(
+        "UPDATE reservations SET estado = 'cancelada', updated_at = ? WHERE id = ?",
+        (datetime.now().isoformat(timespec="seconds"), reserva_id),
+    )
+    db.commit()
+    flash("Reserva cancelada.", "warning")
+    destino = request.args.get("next") or request.referrer or url_for("admin_dashboard")
+    return redirect(destino)
+
+
+@app.route("/admin/reserva/<int:reserva_id>/ajuste-rapido", methods=["POST"])
+@admin_required
+def admin_ajuste_rapido(reserva_id: int):
+    db = get_db()
+    nota = request.form.get("nota_admin", "").strip()
+    destino = request.form.get("next") or url_for("admin_calendar")
+    if not nota:
+        flash("Debe indicar el ajuste solicitado.", "danger")
+        return redirect(destino)
+    reserva = db.execute("SELECT id FROM reservations WHERE id = ?", (reserva_id,)).fetchone()
+    if not reserva:
+        abort(404)
+    db.execute(
+        "UPDATE reservations SET estado = 'requiere_ajuste', nota_admin = ?, updated_at = ? WHERE id = ?",
+        (nota, datetime.now().isoformat(timespec="seconds"), reserva_id),
+    )
+    db.commit()
+    flash("Se solicitó el ajuste al usuario.", "info")
+    return redirect(destino)
 
 
 @app.route("/admin/reserva/<int:reserva_id>/ajuste", methods=["GET", "POST"])
@@ -1673,7 +2141,8 @@ def admin_eliminar_reserva(reserva_id: int):
     db.execute("DELETE FROM reservations WHERE id = ?", (reserva_id,))
     db.commit()
     flash("Reserva eliminada.", "warning")
-    return redirect(url_for("admin_dashboard"))
+    destino = request.args.get("next") or request.referrer or url_for("admin_dashboard")
+    return redirect(destino)
 
 
 @app.route("/admin/users", methods=["GET", "POST"])
