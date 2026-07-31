@@ -1,5 +1,5 @@
 """
-App V2 - Reservas Parcelación Caña Brava
+App V4.1 - Reservas Parcelación Caña Brava
 ----------------------------------------
 Novedades:
 - Reserva individual o combinada (salón + piscina)
@@ -8,7 +8,9 @@ Novedades:
 - Calendario mensual para usuario y admin
   * Usuario: solo ve "Reservado" y horarios
   * Admin: ve además la propiedad
-- Nueva base de datos para evitar conflictos con la V1
+- Priorización automática: ordinarias sobre solicitudes excepcionales
+- Solicitudes por poca anticipación y por límite mensual no bloquean disponibilidad
+- Selector mensual de permisos
 
 Cómo ejecutar:
     pip install flask
@@ -28,6 +30,7 @@ from functools import wraps
 import os
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import psycopg
 from psycopg.rows import dict_row
@@ -53,6 +56,10 @@ if not DATABASE_URL:
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "cambiar-esta-clave-en-produccion-v3")
+COLOMBIA_TZ = ZoneInfo("America/Bogota")
+
+def now_colombia() -> datetime:
+    return datetime.now(COLOMBIA_TZ)
 
 # =========================
 # Base de datos (PostgreSQL)
@@ -197,13 +204,17 @@ def init_db() -> None:
                     nota_admin TEXT DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT DEFAULT '',
-                    solicitud_extra INTEGER NOT NULL DEFAULT 0
+                    solicitud_extra INTEGER NOT NULL DEFAULT 0,
+                    poca_anticipacion INTEGER NOT NULL DEFAULT 0
                 );
                 """
             )
 
             cur.execute(
                 "ALTER TABLE reservations ADD COLUMN IF NOT EXISTS solicitud_extra INTEGER NOT NULL DEFAULT 0"
+            )
+            cur.execute(
+                "ALTER TABLE reservations ADD COLUMN IF NOT EXISTS poca_anticipacion INTEGER NOT NULL DEFAULT 0"
             )
 
             cur.execute("SELECT COUNT(*) FROM resources")
@@ -343,7 +354,7 @@ def count_user_reservations_month(user_id: int, resource_id: int, fecha: date, e
         FROM reservations
         WHERE user_id = ?
           AND resource_id = ?
-          AND estado IN ('pendiente', 'aprobada', 'requiere_ajuste')
+          AND estado = 'aprobada'
           AND fecha >= ?
           AND fecha < ?
     """
@@ -363,7 +374,7 @@ def count_pool_people_same_slot(fecha: str, hora_inicio: str, hora_fin: str, exc
         JOIN resources rs ON rs.id = r.resource_id
         WHERE rs.codigo = 'PISCINA'
           AND r.fecha = ?
-          AND r.estado IN ('pendiente', 'aprobada', 'requiere_ajuste')
+          AND r.estado = 'aprobada'
           AND NOT (r.hora_fin <= ? OR r.hora_inicio >= ?)
     """
     params = [fecha, hora_inicio, hora_fin]
@@ -381,7 +392,7 @@ def has_conflict_exclusive(resource_id: int, fecha: str, hora_inicio: str, hora_
         FROM reservations
         WHERE resource_id = ?
           AND fecha = ?
-          AND estado IN ('pendiente', 'aprobada', 'requiere_ajuste')
+          AND estado = 'aprobada'
           AND NOT (hora_fin <= ? OR hora_inicio >= ?)
     """
     params = [resource_id, fecha, hora_inicio, hora_fin]
@@ -413,6 +424,7 @@ def create_reservation_record(
     estado: str,
     observaciones: str,
     solicitud_extra: int = 0,
+    poca_anticipacion: int = 0,
 ) -> None:
     db = get_db()
     db.execute(
@@ -420,8 +432,8 @@ def create_reservation_record(
         INSERT INTO reservations
         (user_id, resource_id, fecha, hora_inicio, hora_fin, asistentes,
          invitados_registrados, estado, observaciones, motivo_rechazo, nota_admin,
-         created_at, updated_at, solicitud_extra)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?)
+         created_at, updated_at, solicitud_extra, poca_anticipacion)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?)
         """,
         (
             user_id,
@@ -436,6 +448,7 @@ def create_reservation_record(
             datetime.now().isoformat(timespec="seconds"),
             datetime.now().isoformat(timespec="seconds"),
             solicitud_extra,
+            poca_anticipacion,
         ),
     )
     db.commit()
@@ -477,7 +490,7 @@ def update_reservation_record(reservation_id: int, fecha: str, hora_inicio: str,
 
 
 def monthly_permission_summary(user_id: int, fecha: Optional[date] = None):
-    fecha = fecha or date.today()
+    fecha = fecha or now_colombia().date()
     salon = resource_by_codigo("SALON")
     piscina = resource_by_codigo("PISCINA")
 
@@ -498,7 +511,7 @@ def monthly_permission_summary(user_id: int, fecha: Optional[date] = None):
             "limite": piscina_limite,
             "disponibles": max(0, piscina_limite - piscina_usadas),
         },
-        "mes": pycalendar.month_name[fecha.month],
+        "mes": ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"][fecha.month],
         "year": fecha.year,
     }
 
@@ -531,7 +544,8 @@ def validate_reservation_rules(
     except ValueError:
         return False, "La fecha u hora tiene un formato inválido."
 
-    hoy = date.today()
+    ahora = now_colombia()
+    hoy = ahora.date()
     if fecha < hoy:
         return False, "No se permiten reservas en fechas pasadas."
 
@@ -542,6 +556,11 @@ def validate_reservation_rules(
     if hora_inicio_str >= hora_fin_str:
         return False, "La hora final debe ser posterior a la hora inicial."
 
+    if fecha == hoy:
+        inicio_solicitado = datetime.combine(fecha, datetime.strptime(hora_inicio_str, "%H:%M").time(), tzinfo=COLOMBIA_TZ)
+        if inicio_solicitado <= ahora:
+            return False, "El horario solicitado para hoy ya inició. Seleccione un horario posterior."
+
     if user_row["rol"] != "admin" and int(user_row["al_dia"]) != 1:
         return False, "Solo pueden reservar residentes o propietarios al día en administración."
 
@@ -550,10 +569,6 @@ def validate_reservation_rules(
         return False, f"La fecha está bloqueada: {bloqueo}"
 
     if resource_row["codigo"] == "SALON":
-        dias_min = int(get_config("dias_anticipacion_salon", "2"))
-        if fecha < hoy + timedelta(days=dias_min):
-            return False, f"El salón debe reservarse con al menos {dias_min} días de anticipación."
-
         if hora_inicio_str < get_config("hora_inicio_salon", "09:00") or hora_fin_str > get_config("hora_fin_salon", "21:00"):
             return False, "El salón solo puede reservarse entre 09:00 y 21:00."
 
@@ -634,6 +649,8 @@ def get_calendar_month_data(
     reservations_by_day = {}
     for r in rows:
         is_own = viewer_user_id is not None and int(r["user_id"]) == int(viewer_user_id)
+        if not is_admin and not is_own and r["estado"] != "aprobada":
+            continue
         if is_admin:
             texto = (
                 f'{r["recurso"]} · {r["hora_inicio"]}-{r["hora_fin"]} · '
@@ -660,6 +677,7 @@ def get_calendar_month_data(
             "nota_admin": r["nota_admin"] or "",
             "observaciones": r["observaciones"] or "",
             "solicitud_extra": int(r["solicitud_extra"] or 0),
+            "poca_anticipacion": int(r["poca_anticipacion"] or 0),
         }
         reservations_by_day.setdefault(r["fecha"], []).append(item)
 
@@ -921,7 +939,7 @@ def mi_cuenta():
 @app.route("/calendario")
 @login_required
 def user_calendar():
-    today = date.today()
+    today = now_colombia().date()
     year = int(request.args.get("year", today.year))
     month = int(request.args.get("month", today.month))
     weeks = get_calendar_month_data(
@@ -1040,6 +1058,7 @@ def user_calendar():
             <dt class="col-5">Estado</dt><dd class="col-7"><span class="badge text-bg-${statusColor(r.estado)}">${escapeHtml(formatStatus(r.estado))}</span></dd>
             <dt class="col-5">Observación admin</dt><dd class="col-7">${escapeHtml(r.nota_admin || 'Sin observaciones')}</dd>
             <dt class="col-5">Solicitud adicional</dt><dd class="col-7">${r.solicitud_extra ? 'Sí, sujeta a autorización' : 'No'}</dd>
+            <dt class="col-5">Poca anticipación</dt><dd class="col-7">${r.poca_anticipacion ? 'Sí, requiere aprobación' : 'No'}</dd>
           </dl>`;
         bootstrap.Modal.getOrCreateInstance(document.getElementById('reservationModal')).show();
       }
@@ -1086,7 +1105,7 @@ def user_calendar():
 @app.route("/admin/calendario")
 @admin_required
 def admin_calendar():
-    today = date.today()
+    today = now_colombia().date()
     year = int(request.args.get("year", today.year))
     month = int(request.args.get("month", today.month))
     weeks = get_calendar_month_data(year, month, is_admin=True)
@@ -1223,7 +1242,8 @@ def admin_calendar():
                 <dt class="col-5">Horario</dt><dd class="col-7">${escapeHtml(r.hora_inicio)} - ${escapeHtml(r.hora_fin)}</dd>
                 <dt class="col-5">Asistentes</dt><dd class="col-7">${escapeHtml(r.asistentes)}</dd>
                 <dt class="col-5">Estado</dt><dd class="col-7"><span class="badge text-bg-${statusColor(r.estado)}">${escapeHtml(formatStatus(r.estado))}</span></dd>
-                <dt class="col-5">Solicitud adicional</dt><dd class="col-7">${r.solicitud_extra ? '<span class="badge text-bg-warning">Sí</span>' : 'No'}</dd>
+                <dt class="col-5">Solicitud adicional</dt><dd class="col-7">${r.solicitud_extra ? '<span class="badge text-bg-primary">Sí</span>' : 'No'}</dd>
+                <dt class="col-5">Poca anticipación</dt><dd class="col-7">${r.poca_anticipacion ? '<span class="badge text-bg-warning">Sí</span>' : 'No'}</dd>
               </dl>
             </div>
           </div>
@@ -1284,7 +1304,13 @@ def mis_reservas():
         """,
         (session["user_id"],),
     ).fetchall()
-    permisos = monthly_permission_summary(session["user_id"])
+    mes_param = request.args.get("mes", "").strip()
+    try:
+        fecha_consulta = datetime.strptime(mes_param, "%Y-%m").date().replace(day=1) if mes_param else now_colombia().date().replace(day=1)
+    except ValueError:
+        fecha_consulta = now_colombia().date().replace(day=1)
+    permisos = monthly_permission_summary(session["user_id"], fecha_consulta)
+    selected_month = fecha_consulta.strftime("%Y-%m")
 
     content = """
     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
@@ -1300,6 +1326,16 @@ def mis_reservas():
       </div>
     </div>
 
+    <form method="get" class="card card-shadow mb-3">
+      <div class="card-body d-flex align-items-end gap-2 flex-wrap">
+        <div>
+          <label class="form-label mb-1">Consultar permisos de otro mes</label>
+          <input type="month" name="mes" class="form-control" value="{{ selected_month }}">
+        </div>
+        <button class="btn btn-outline-dark">Consultar</button>
+      </div>
+    </form>
+
     <div class="row g-3 mb-4">
       <div class="col-md-6">
         <div class="card card-shadow permission-card h-100">
@@ -1313,7 +1349,7 @@ def mis_reservas():
             </div>
             <div class="display-6 mt-3">{{ permisos.salon.disponibles }}</div>
             <div>permiso(s) disponible(s)</div>
-            <div class="small-muted mt-2">Utilizados o en trámite: {{ permisos.salon.usadas }}</div>
+            <div class="small-muted mt-2">Utilizados: {{ permisos.salon.usadas }}</div>
           </div>
         </div>
       </div>
@@ -1329,7 +1365,7 @@ def mis_reservas():
             </div>
             <div class="display-6 mt-3">{{ permisos.piscina.disponibles }}</div>
             <div>permiso(s) disponible(s)</div>
-            <div class="small-muted mt-2">Utilizados o en trámite: {{ permisos.piscina.usadas }}</div>
+            <div class="small-muted mt-2">Utilizados: {{ permisos.piscina.usadas }}</div>
           </div>
         </div>
       </div>
@@ -1366,10 +1402,14 @@ def mis_reservas():
                   <td>{{ r['asistentes'] }}</td>
                   <td><span class="badge text-bg-{{ reservation_status_badge(r['estado']) }}">{{ r['estado'].replace('_', ' ') }}</span></td>
                   <td>
+                    {% if r['poca_anticipacion'] %}
+                      <span class="badge text-bg-warning">Poca anticipación</span>
+                    {% endif %}
                     {% if r['solicitud_extra'] %}
-                      <span class="badge text-bg-warning">Adicional</span>
-                    {% else %}
-                      <span class="badge text-bg-light">Ordinaria</span>
+                      <span class="badge text-bg-primary">Adicional</span>
+                    {% endif %}
+                    {% if not r['poca_anticipacion'] and not r['solicitud_extra'] %}
+                      <span class="badge text-bg-success">Ordinaria</span>
                     {% endif %}
                   </td>
                   <td>{{ r['nota_admin'] or '' }}</td>
@@ -1397,6 +1437,7 @@ def mis_reservas():
         reservas=reservas,
         permisos=permisos,
         reservation_status_badge=reservation_status_badge,
+        selected_month=selected_month,
     )
 
 
@@ -1434,14 +1475,11 @@ def nueva_reserva(codigo: str):
             limite_mes = int(get_config(limite_clave, "2" if recurso["codigo"] == "SALON" else "8"))
             usadas = count_user_reservations_month(user["id"], recurso["id"], fecha_obj)
             es_extra = solicitar_extra and usadas >= limite_mes
+            es_poca_anticipacion = user["rol"] != "admin" and fecha_obj < now_colombia().date() + timedelta(days=2)
 
-            estado = "pendiente" if es_extra else (
-                "aprobada" if (
-                    recurso["codigo"] == "SALON" and get_config("auto_aprobar_salon", "0") == "1"
-                ) or (
-                    recurso["codigo"] == "PISCINA" and get_config("auto_aprobar_piscina", "1") == "1"
-                ) else "pendiente"
-            )
+            # Las reservas ordinarias de ambos espacios se aprueban automáticamente.
+            # Las excepcionales quedan pendientes y no bloquean el espacio.
+            estado = "pendiente" if (es_extra or es_poca_anticipacion) else "aprobada"
             create_reservation_record(
                 user["id"],
                 recurso["id"],
@@ -1453,19 +1491,29 @@ def nueva_reserva(codigo: str):
                 estado,
                 observaciones,
                 solicitud_extra=1 if es_extra else 0,
+                poca_anticipacion=1 if es_poca_anticipacion else 0,
             )
-            flash(f"Reserva registrada con estado: {estado}.", "success")
+            if estado == "aprobada":
+                flash("Reserva aprobada automáticamente.", "success")
+            else:
+                motivos = []
+                if es_poca_anticipacion:
+                    motivos.append("poca anticipación")
+                if es_extra:
+                    motivos.append("solicitud adicional")
+                flash("Solicitud registrada como pendiente por " + " y ".join(motivos) + ".", "warning")
             return redirect(url_for("mis_reservas"))
 
     ayuda = {
         "SALON": [
-            "Reserva con al menos 2 días de anticipación.",
+            "Con 2 días o más se aprueba automáticamente si cumple las reglas; con menos tiempo queda pendiente.",
             "Horario permitido: 09:00 a 21:00.",
             "Uso exclusivo para quien lo reserve.",
             "Capacidad máxima: 40 personas.",
             "No se permite ceder la reserva a terceros no autorizados.",
         ],
         "PISCINA": [
+            "Con 2 días o más se aprueba automáticamente si cumple las reglas; con menos tiempo queda pendiente.",
             "Horario permitido: miércoles a lunes de 09:00 a 21:00.",
             "El martes está cerrado por mantenimiento.",
             "La piscina no es exclusiva por reservar el salón.",
@@ -1609,28 +1657,28 @@ def nueva_reserva_combinada():
                     limite_salon = int(get_config("max_reservas_salon_mes", "2"))
                     usadas_salon = count_user_reservations_month(user["id"], salon["id"], fecha_obj)
                     extra_salon = solicitar_extra and usadas_salon >= limite_salon
-                    estado_salon = "pendiente" if extra_salon else (
-                        "aprobada" if get_config("auto_aprobar_salon", "0") == "1" else "pendiente"
-                    )
+                    poca_salon = user["rol"] != "admin" and fecha_obj < now_colombia().date() + timedelta(days=2)
+                    estado_salon = "pendiente" if (extra_salon or poca_salon) else "aprobada"
                     create_reservation_record(
                         user["id"], salon["id"], fecha, salon_hora_inicio, salon_hora_fin,
                         salon_asistentes, invitados, estado_salon, observaciones,
                         solicitud_extra=1 if extra_salon else 0,
+                        poca_anticipacion=1 if poca_salon else 0,
                     )
                 if reservar_piscina:
                     limite_piscina = int(get_config("max_reservas_piscina_mes", "8"))
                     usadas_piscina = count_user_reservations_month(user["id"], piscina["id"], fecha_obj)
                     extra_piscina = solicitar_extra and usadas_piscina >= limite_piscina
-                    estado_piscina = "pendiente" if extra_piscina else (
-                        "aprobada" if get_config("auto_aprobar_piscina", "1") == "1" else "pendiente"
-                    )
+                    poca_piscina = user["rol"] != "admin" and fecha_obj < now_colombia().date() + timedelta(days=2)
+                    estado_piscina = "pendiente" if (extra_piscina or poca_piscina) else "aprobada"
                     create_reservation_record(
                         user["id"], piscina["id"], fecha, piscina_hora_inicio, piscina_hora_fin,
                         piscina_asistentes, invitados, estado_piscina, observaciones,
                         solicitud_extra=1 if extra_piscina else 0,
+                        poca_anticipacion=1 if poca_piscina else 0,
                     )
 
-                flash("Se registró la solicitud combinada.", "success")
+                flash("Se registró la reserva combinada. Los espacios ordinarios fueron aprobados automáticamente; las excepciones quedaron pendientes.", "success")
                 return redirect(url_for("mis_reservas"))
 
     content = """
@@ -1773,13 +1821,34 @@ def editar_mi_reserva(reserva_id: int):
         invitados = request.form.get("invitados_registrados", "").strip()
         observaciones = request.form.get("observaciones", "").strip()
 
-        ok, mensaje = validate_reservation_rules(user, recurso, fecha, hora_inicio, hora_fin, asistentes, exclude_id=reserva_id)
+        permitir_extra = bool(int(reserva["solicitud_extra"] or 0))
+        ok, mensaje = validate_reservation_rules(
+            user, recurso, fecha, hora_inicio, hora_fin, asistentes,
+            exclude_id=reserva_id, permitir_solicitud_extra=permitir_extra
+        )
         if not ok:
             flash(mensaje, "danger")
         else:
-            nuevo_estado = "pendiente"
-            update_reservation_record(reserva_id, fecha, hora_inicio, hora_fin, asistentes, invitados, observaciones, estado=nuevo_estado, nota_admin="")
-            flash("Reserva actualizada y enviada nuevamente para validación.", "success")
+            fecha_obj = parse_fecha(fecha)
+            limite_clave = "max_reservas_salon_mes" if recurso["codigo"] == "SALON" else "max_reservas_piscina_mes"
+            limite_mes = int(get_config(limite_clave, "2" if recurso["codigo"] == "SALON" else "8"))
+            usadas = count_user_reservations_month(user["id"], recurso["id"], fecha_obj, exclude_id=reserva_id)
+            es_extra = permitir_extra and usadas >= limite_mes
+            es_poca = user["rol"] != "admin" and fecha_obj < now_colombia().date() + timedelta(days=2)
+            nuevo_estado = "pendiente" if (es_extra or es_poca) else "aprobada"
+            update_reservation_record(
+                reserva_id, fecha, hora_inicio, hora_fin, asistentes, invitados, observaciones,
+                estado=nuevo_estado, nota_admin=""
+            )
+            db.execute(
+                "UPDATE reservations SET solicitud_extra = ?, poca_anticipacion = ? WHERE id = ?",
+                (1 if es_extra else 0, 1 if es_poca else 0, reserva_id),
+            )
+            db.commit()
+            if nuevo_estado == "aprobada":
+                flash("La reserva actualizada cumple las condiciones ordinarias y fue aprobada automáticamente.", "success")
+            else:
+                flash("Reserva actualizada y enviada nuevamente para aprobación administrativa.", "warning")
             return redirect(url_for("mis_reservas"))
 
     content = """
@@ -1889,6 +1958,7 @@ def admin_dashboard():
                 <th>Horario</th>
                 <th>Asistentes</th>
                 <th>Estado</th>
+                <th>Prioridad</th>
                 <th>Nota admin</th>
                 <th>Acciones</th>
               </tr>
@@ -1903,6 +1973,11 @@ def admin_dashboard():
                   <td>{{ r['hora_inicio'] }} - {{ r['hora_fin'] }}</td>
                   <td>{{ r['asistentes'] }}</td>
                   <td><span class="badge text-bg-{{ reservation_status_badge(r['estado']) }}">{{ r['estado'] }}</span></td>
+                  <td>
+                    {% if r['poca_anticipacion'] %}<span class="badge text-bg-warning">Poca anticipación</span>{% endif %}
+                    {% if r['solicitud_extra'] %}<span class="badge text-bg-primary">Adicional</span>{% endif %}
+                    {% if not r['poca_anticipacion'] and not r['solicitud_extra'] %}<span class="badge text-bg-success">Ordinaria</span>{% endif %}
+                  </td>
                   <td>{{ r['nota_admin'] or '' }}</td>
                   <td class="d-flex gap-1 flex-wrap">
                     {% if r['estado'] in ['pendiente', 'requiere_ajuste'] %}
@@ -1914,7 +1989,7 @@ def admin_dashboard():
                   </td>
                 </tr>
               {% else %}
-                <tr><td colspan="9" class="text-center text-muted">No hay reservas.</td></tr>
+                <tr><td colspan="10" class="text-center text-muted">No hay reservas.</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -1934,12 +2009,22 @@ def admin_decision_reserva(reserva_id: int, decision: str):
         abort(404)
 
     if decision == "aprobar":
+        usuario = db.execute("SELECT * FROM users WHERE id = ?", (reserva["user_id"],)).fetchone()
+        recurso = resource_by_id(reserva["resource_id"])
+        ok, mensaje = validate_reservation_rules(
+            usuario, recurso, reserva["fecha"], reserva["hora_inicio"], reserva["hora_fin"],
+            int(reserva["asistentes"]), exclude_id=reserva_id, permitir_solicitud_extra=True
+        )
+        if not ok:
+            flash("No se puede aprobar: " + mensaje, "danger")
+            destino = request.args.get("next") or request.referrer or url_for("admin_dashboard")
+            return redirect(destino)
         db.execute(
             "UPDATE reservations SET estado = 'aprobada', motivo_rechazo = '', nota_admin = '', updated_at = ? WHERE id = ?",
-            (datetime.now().isoformat(timespec="seconds"), reserva_id),
+            (now_colombia().isoformat(timespec="seconds"), reserva_id),
         )
         db.commit()
-        flash("Reserva aprobada.", "success")
+        flash("Reserva aprobada. Desde este momento el horario queda ocupado.", "success")
     else:
         abort(400)
     destino = request.args.get("next") or request.referrer or url_for("admin_dashboard")
