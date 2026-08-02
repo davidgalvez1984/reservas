@@ -712,18 +712,69 @@ BASE_HTML = """
   <meta charset="utf-8">
   <title>{{ title or "Reservas Caña Brava" }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#173f35">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
   <style>
-    body { background: #f4f6f9; }
+    :root {
+      --cb-green: #173f35;
+      --cb-green-2: #245d4e;
+      --cb-green-soft: #eaf2ef;
+      --cb-gold: #c6a15b;
+      --cb-ink: #24332e;
+      --cb-muted: #71807a;
+      --cb-bg: #f3f6f5;
+      --cb-border: #dfe7e4;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      background: var(--cb-bg);
+      color: var(--cb-ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
     .container-main { max-width: 1200px; }
-    .card-shadow { box-shadow: 0 10px 25px rgba(0,0,0,.08); border: none; }
+
+    .navbar-cb {
+      background: linear-gradient(110deg, #12352d 0%, #1c4d41 60%, #245d4e 100%);
+      box-shadow: 0 8px 28px rgba(19, 53, 45, .15);
+    }
+    .navbar-brand { font-weight: 750; letter-spacing: -.02em; }
+    .brand-mark {
+      width: 36px; height: 36px; border-radius: 12px; display: inline-grid; place-items: center;
+      background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.18);
+      margin-right: .55rem;
+    }
+    .navbar-cb .btn-outline-light { border-color: rgba(255,255,255,.3); }
+    .navbar-cb .btn-outline-light:hover { color: var(--cb-green); background: #fff; }
+    .nav-user { font-size: .86rem; color: rgba(255,255,255,.78); white-space: nowrap; }
+
+    .card {
+      border: 1px solid var(--cb-border);
+      border-radius: 18px;
+    }
+    .card-shadow { box-shadow: 0 14px 34px rgba(23, 63, 53, .08); border: 1px solid rgba(223,231,228,.9); }
     .table td, .table th { vertical-align: middle; }
-    .small-muted { font-size: .92rem; color: #6c757d; }
+    .small-muted { font-size: .92rem; color: var(--cb-muted); }
+    .btn { border-radius: 10px; font-weight: 600; }
+    .btn-dark { background: var(--cb-green); border-color: var(--cb-green); }
+    .btn-dark:hover, .btn-dark:focus { background: #0f3028; border-color: #0f3028; }
+    .btn-primary { background: var(--cb-green-2); border-color: var(--cb-green-2); }
+    .btn-primary:hover { background: var(--cb-green); border-color: var(--cb-green); }
+    .form-control, .form-select {
+      border-radius: 11px; border-color: #d5dfdb; min-height: 44px;
+    }
+    .form-control:focus, .form-select:focus {
+      border-color: #6a9d8e; box-shadow: 0 0 0 .2rem rgba(36,93,78,.12);
+    }
+    .alert { border: 0; border-radius: 14px; box-shadow: 0 8px 20px rgba(0,0,0,.05); }
+
+    .calendar-table { border-radius: 16px; overflow: hidden; }
     .calendar-table td { width: 14.28%; min-height: 155px; height: 155px; vertical-align: top; background: #fff; }
     .day-box { font-size: .82rem; }
-    .day-num { font-weight: 700; margin-bottom: .25rem; }
+    .day-num { font-weight: 700; margin-bottom: .25rem; color: var(--cb-ink); }
     .muted-day { background: #f1f3f5 !important; color: #adb5bd; }
-    .event-pill { font-size: .74rem; padding: .28rem .45rem; border-radius: .5rem; display: block; margin-bottom: .28rem; border: 0; width: 100%; text-align: left; cursor: pointer; }
+    .event-pill { font-size: .74rem; padding: .32rem .48rem; border-radius: .55rem; display: block; margin-bottom: .28rem; border: 0; width: 100%; text-align: left; cursor: pointer; transition: .15s ease; }
     .event-pill:hover { filter: brightness(.97); transform: translateY(-1px); }
     .event-pendiente { background: #fff3cd; color: #664d03; }
     .event-aprobada { background: #d1e7dd; color: #0f5132; }
@@ -731,48 +782,126 @@ BASE_HTML = """
     .event-cancelada { background: #e2e3e5; color: #41464b; }
     .event-reservado { background: #e9ecef; color: #343a40; }
     .event-block { background: #ffe3e3; color: #842029; }
-    .permission-card .display-6 { font-weight: 700; }
+    .permission-card .display-6 { font-weight: 750; color: var(--cb-green); }
     .calendar-legend span { display: inline-flex; align-items: center; gap: .3rem; margin-right: .8rem; font-size: .85rem; }
     .legend-dot { width: .8rem; height: .8rem; border-radius: 50%; display: inline-block; }
     .top-actions a { text-decoration: none; }
+
+    /* Inicio de sesión */
+    .login-page {
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 10% 15%, rgba(198,161,91,.16), transparent 26%),
+        radial-gradient(circle at 86% 80%, rgba(71,135,116,.22), transparent 28%),
+        linear-gradient(135deg, #0f3028 0%, #173f35 48%, #245d4e 100%);
+    }
+    .login-shell { min-height: 100vh; display: grid; place-items: center; padding: 32px 16px; }
+    .login-card {
+      width: 100%; max-width: 980px; overflow: hidden; border: 1px solid rgba(255,255,255,.18);
+      border-radius: 26px; box-shadow: 0 30px 80px rgba(7, 27, 22, .28); background: rgba(255,255,255,.98);
+    }
+    .login-brand-panel {
+      min-height: 570px; padding: 54px 48px; color: white; position: relative;
+      background:
+        linear-gradient(165deg, rgba(13,48,39,.96), rgba(31,84,70,.95)),
+        radial-gradient(circle at top right, rgba(198,161,91,.25), transparent 35%);
+      display: flex; flex-direction: column; justify-content: space-between;
+    }
+    .login-brand-panel::after {
+      content: ""; position: absolute; width: 260px; height: 260px; border: 1px solid rgba(255,255,255,.09);
+      border-radius: 50%; right: -100px; bottom: -95px;
+    }
+    .login-logo {
+      width: 62px; height: 62px; border-radius: 18px; display: grid; place-items: center;
+      font-size: 1.75rem; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.18);
+      backdrop-filter: blur(8px);
+    }
+    .login-brand-panel h1 { font-size: clamp(2rem, 3vw, 3.15rem); font-weight: 760; letter-spacing: -.04em; line-height: 1.03; }
+    .login-brand-panel p { color: rgba(255,255,255,.77); font-size: 1.02rem; max-width: 430px; }
+    .login-feature { display: flex; align-items: center; gap: .7rem; color: rgba(255,255,255,.83); margin-top: .65rem; }
+    .login-feature i { color: #e1c17f; }
+    .login-form-panel { padding: 54px 48px; display: flex; flex-direction: column; justify-content: center; background: #fff; }
+    .login-form-panel h2 { font-weight: 760; letter-spacing: -.03em; }
+    .login-eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: .74rem; font-weight: 750; color: var(--cb-green-2); }
+    .login-input-wrap { position: relative; }
+    .login-input-wrap > i:first-child { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #84938e; z-index: 2; }
+    .login-input-wrap .form-control { padding-left: 42px; min-height: 50px; background: #fbfcfc; }
+    .password-toggle { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: #73817c; padding: .35rem .5rem; }
+    .login-submit { min-height: 50px; border-radius: 12px; font-weight: 700; box-shadow: 0 10px 20px rgba(23,63,53,.18); }
+    .login-footer { color: #8a9893; font-size: .78rem; margin-top: 1.2rem; text-align: center; }
+
+    @media (max-width: 991.98px) {
+      .nav-user { display: none; }
+      .login-brand-panel { min-height: auto; padding: 34px 30px; }
+      .login-form-panel { padding: 38px 30px; }
+    }
+    @media (max-width: 767.98px) {
+      .login-card { border-radius: 20px; }
+      .login-brand-panel { display: none; }
+      .login-form-panel { min-height: 560px; padding: 38px 26px; }
+      .calendar-table td { min-height: 120px; height: 120px; }
+    }
   </style>
 </head>
-<body>
-<nav class="navbar navbar-expand-lg bg-dark navbar-dark mb-4">
-  <div class="container container-main">
-    <a class="navbar-brand" href="{{ url_for('index') }}">Reservas Caña Brava</a>
-    <div class="d-flex gap-2 align-items-center top-actions">
+<body class="{{ body_class or '' }}">
+{% if show_nav is not defined or show_nav %}
+<nav class="navbar navbar-expand-lg navbar-dark navbar-cb mb-4">
+  <div class="container container-main py-1">
+    <a class="navbar-brand d-flex align-items-center" href="{{ url_for('index') }}">
+      <span class="brand-mark"><i class="bi bi-tree-fill"></i></span>
+      <span>Reservas Caña Brava</span>
+    </a>
+    <div class="d-flex flex-wrap gap-2 align-items-center top-actions justify-content-end">
       {% if session.get('user_id') %}
         {% if session.get('rol') == 'admin' %}
-          <a class="btn btn-outline-light btn-sm" href="{{ url_for('admin_dashboard') }}">Panel</a>
-          <a class="btn btn-outline-light btn-sm" href="{{ url_for('admin_calendar') }}">Calendario</a>
+          <a class="btn btn-outline-light btn-sm" href="{{ url_for('admin_dashboard') }}"><i class="bi bi-grid me-1"></i>Panel</a>
+          <a class="btn btn-outline-light btn-sm" href="{{ url_for('admin_calendar') }}"><i class="bi bi-calendar3 me-1"></i>Calendario</a>
         {% else %}
-          <a class="btn btn-outline-light btn-sm" href="{{ url_for('mis_reservas') }}">Mis reservas</a>
-          <a class="btn btn-outline-light btn-sm" href="{{ url_for('user_calendar') }}">Calendario</a>
+          <a class="btn btn-outline-light btn-sm" href="{{ url_for('mis_reservas') }}"><i class="bi bi-bookmark-check me-1"></i>Mis reservas</a>
+          <a class="btn btn-outline-light btn-sm" href="{{ url_for('user_calendar') }}"><i class="bi bi-calendar3 me-1"></i>Calendario</a>
         {% endif %}
-        <a class="btn btn-outline-light btn-sm" href="{{ url_for('mi_cuenta') }}">Mi cuenta</a>
-        <span class="navbar-text text-white me-2">{{ session.get('nombre') }} ({{ session.get('rol') }})</span>
-        <a class="btn btn-outline-light btn-sm" href="{{ url_for('logout') }}">Salir</a>
+        <a class="btn btn-outline-light btn-sm" href="{{ url_for('mi_cuenta') }}"><i class="bi bi-person me-1"></i>Mi cuenta</a>
+        <span class="nav-user"><i class="bi bi-person-circle me-1"></i>{{ session.get('nombre') }}</span>
+        <a class="btn btn-light btn-sm" style="color:#173f35" href="{{ url_for('logout') }}"><i class="bi bi-box-arrow-right me-1"></i>Salir</a>
       {% endif %}
     </div>
   </div>
 </nav>
+{% endif %}
 
+{% if show_nav is not defined or show_nav %}
 <div class="container container-main pb-5">
+{% else %}
+<div class="container-fluid p-0">
+{% endif %}
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% if messages %}
+      <div class="{{ 'container position-fixed top-0 start-50 translate-middle-x pt-3' if show_nav == false else '' }}" style="z-index:1080; max-width:720px;">
       {% for category, message in messages %}
         <div class="alert alert-{{ category if category in ['success','danger','warning','info','primary','secondary'] else 'info' }} alert-dismissible fade show" role="alert">
           {{ message }}
           <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
         </div>
       {% endfor %}
+      </div>
     {% endif %}
   {% endwith %}
 
   {{ content|safe }}
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+  document.querySelectorAll('[data-password-toggle]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      const target = document.getElementById(btn.dataset.passwordToggle);
+      if (!target) return;
+      const showing = target.type === 'text';
+      target.type = showing ? 'password' : 'text';
+      btn.innerHTML = showing ? '<i class="bi bi-eye"></i>' : '<i class="bi bi-eye-slash"></i>';
+      btn.setAttribute('aria-label', showing ? 'Mostrar contraseña' : 'Ocultar contraseña');
+    });
+  });
+</script>
 </body>
 </html>
 """
@@ -808,29 +937,52 @@ def login():
         flash("Credenciales inválidas.", "danger")
 
     content = """
-    <div class="row justify-content-center">
-      <div class="col-md-5">
-        <div class="card card-shadow">
-          <div class="card-body p-4">
-            <h2 class="mb-3">Ingreso</h2>
-            <p class="small-muted">Versión 2 del sistema de reservas.</p>
-            <form method="post">
+    <div class="login-shell">
+      <div class="login-card">
+        <div class="row g-0">
+          <div class="col-lg-6 login-brand-panel">
+            <div>
+              <div class="login-logo mb-4"><i class="bi bi-tree-fill"></i></div>
+              <div class="text-uppercase small fw-semibold mb-3" style="letter-spacing:.14em;color:#e1c17f;">Parcelación Caña Brava</div>
+              <h1 class="mb-4">Tus espacios comunes, mejor organizados.</h1>
+              <p class="mb-4">Consulta disponibilidad, solicita tus reservas y lleva el control de tus espacios desde un solo lugar.</p>
+              <div class="login-feature"><i class="bi bi-check-circle-fill"></i><span>Reservas claras y organizadas</span></div>
+              <div class="login-feature"><i class="bi bi-calendar-check-fill"></i><span>Disponibilidad y calendario en línea</span></div>
+              <div class="login-feature"><i class="bi bi-shield-check"></i><span>Acceso exclusivo para residentes y administración</span></div>
+            </div>
+            <div class="small" style="color:rgba(255,255,255,.55);">Sistema de gestión de reservas</div>
+          </div>
+          <div class="col-lg-6 login-form-panel">
+            <div class="login-eyebrow mb-2">Bienvenido</div>
+            <h2 class="mb-2">Iniciar sesión</h2>
+            <p class="small-muted mb-4">Ingresa con las credenciales asignadas por la administración.</p>
+            <form method="post" autocomplete="on">
               <div class="mb-3">
-                <label class="form-label">Usuario</label>
-                <input name="username" class="form-control" required>
+                <label class="form-label fw-semibold" for="username">Usuario</label>
+                <div class="login-input-wrap">
+                  <i class="bi bi-person"></i>
+                  <input id="username" name="username" class="form-control" placeholder="Escribe tu usuario" autocomplete="username" autofocus required>
+                </div>
               </div>
-              <div class="mb-3">
-                <label class="form-label">Contraseña</label>
-                <input name="password" type="password" class="form-control" required>
+              <div class="mb-4">
+                <label class="form-label fw-semibold" for="password">Contraseña</label>
+                <div class="login-input-wrap">
+                  <i class="bi bi-lock"></i>
+                  <input id="password" name="password" type="password" class="form-control pe-5" placeholder="Escribe tu contraseña" autocomplete="current-password" required>
+                  <button type="button" class="password-toggle" data-password-toggle="password" aria-label="Mostrar contraseña"><i class="bi bi-eye"></i></button>
+                </div>
               </div>
-              <button class="btn btn-dark w-100">Entrar</button>
+              <button class="btn btn-dark login-submit w-100" type="submit">
+                Ingresar <i class="bi bi-arrow-right ms-1"></i>
+              </button>
             </form>
+            <div class="login-footer">Parcelación Caña Brava · Acceso privado</div>
           </div>
         </div>
       </div>
     </div>
     """
-    return render_page(content, title="Ingreso")
+    return render_page(content, title="Ingreso | Caña Brava", show_nav=False, body_class="login-page")
 
 
 @app.route("/logout")
