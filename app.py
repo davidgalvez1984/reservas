@@ -1,5 +1,5 @@
 """
-App V4.1 - Reservas Parcelación Caña Brava
+App V4.3 - Reservas Parcelación Caña Brava
 ----------------------------------------
 Novedades:
 - Reserva individual o combinada (salón + piscina)
@@ -11,6 +11,7 @@ Novedades:
 - Priorización automática: ordinarias sobre solicitudes excepcionales
 - Solicitudes por poca anticipación y por límite mensual no bloquean disponibilidad
 - Selector mensual de permisos
+- Inicio de sesión con fotografía institucional y crédito de desarrollo
 
 Cómo ejecutar:
     pip install flask
@@ -811,11 +812,19 @@ BASE_HTML = """
       content: ""; position: absolute; width: 260px; height: 260px; border: 1px solid rgba(255,255,255,.09);
       border-radius: 50%; right: -100px; bottom: -95px;
     }
-    .login-logo {
-      width: 62px; height: 62px; border-radius: 18px; display: grid; place-items: center;
-      font-size: 1.75rem; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.18);
-      backdrop-filter: blur(8px);
+    .login-photo {
+      width: 100%; height: 150px; border-radius: 18px; overflow: hidden;
+      border: 1px solid rgba(255,255,255,.18); box-shadow: 0 14px 28px rgba(4,24,19,.20);
+      background: rgba(255,255,255,.08); margin-bottom: 24px; position: relative;
     }
+    .login-photo img { width: 100%; height: 100%; object-fit: cover; object-position: center 58%; display: block; }
+    .login-photo::after {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(180deg, rgba(8,34,28,.03), rgba(8,34,28,.18));
+      pointer-events: none;
+    }
+    .login-credit { color: rgba(255,255,255,.58); font-size: .76rem; line-height: 1.55; }
+    .login-credit strong { color: rgba(255,255,255,.84); font-weight: 650; }
     .login-brand-panel h1 { font-size: clamp(2rem, 3vw, 3.15rem); font-weight: 760; letter-spacing: -.04em; line-height: 1.03; }
     .login-brand-panel p { color: rgba(255,255,255,.77); font-size: 1.02rem; max-width: 430px; }
     .login-feature { display: flex; align-items: center; gap: .7rem; color: rgba(255,255,255,.83); margin-top: .65rem; }
@@ -942,7 +951,9 @@ def login():
         <div class="row g-0">
           <div class="col-lg-6 login-brand-panel">
             <div>
-              <div class="login-logo mb-4"><i class="bi bi-tree-fill"></i></div>
+              <div class="login-photo">
+                <img src="{{ url_for('static', filename='Foto_zonacomun.jpeg') }}" alt="Zona común de la Parcelación Caña Brava">
+              </div>
               <div class="text-uppercase small fw-semibold mb-3" style="letter-spacing:.14em;color:#e1c17f;">Parcelación Caña Brava</div>
               <h1 class="mb-4">Tus espacios comunes, mejor organizados.</h1>
               <p class="mb-4">Consulta disponibilidad, solicita tus reservas y lleva el control de tus espacios desde un solo lugar.</p>
@@ -950,7 +961,10 @@ def login():
               <div class="login-feature"><i class="bi bi-calendar-check-fill"></i><span>Disponibilidad y calendario en línea</span></div>
               <div class="login-feature"><i class="bi bi-shield-check"></i><span>Acceso exclusivo para residentes y administración</span></div>
             </div>
-            <div class="small" style="color:rgba(255,255,255,.55);">Sistema de gestión de reservas</div>
+            <div class="login-credit">
+              <div>Sistema de gestión de reservas</div>
+              <div>Desarrollado por <strong>dfgalvez</strong> · 2026</div>
+            </div>
           </div>
           <div class="col-lg-6 login-form-panel">
             <div class="login-eyebrow mb-2">Bienvenido</div>
@@ -976,7 +990,7 @@ def login():
                 Ingresar <i class="bi bi-arrow-right ms-1"></i>
               </button>
             </form>
-            <div class="login-footer">Parcelación Caña Brava · Acceso privado</div>
+            <div class="login-footer">Parcelación Caña Brava · Acceso privado<br><span>Desarrollado por dfgalvez · 2026</span></div>
           </div>
         </div>
       </div>
