@@ -955,11 +955,11 @@ def login():
                 <img src="{{ url_for('static', filename='Foto_zonacomun.jpeg') }}" alt="Zona común de la Parcelación Caña Brava">
               </div>
               <div class="text-uppercase small fw-semibold mb-3" style="letter-spacing:.14em;color:#e1c17f;">Parcelación Caña Brava</div>
-              <h1 class="mb-4">Tus espacios comunes, mejor organizados.</h1>
-              <p class="mb-4">Consulta disponibilidad, solicita tus reservas y lleva el control de tus espacios desde un solo lugar.</p>
+              <h1 class="mb-4">Tu zona común, mejor organizada.</h1>
+              <p class="mb-4">Consulta disponibilidad, solicita tus reservas y lleva el control de la zona común (salón y piscina) desde un solo lugar.</p>
               <div class="login-feature"><i class="bi bi-check-circle-fill"></i><span>Reservas claras y organizadas</span></div>
               <div class="login-feature"><i class="bi bi-calendar-check-fill"></i><span>Disponibilidad y calendario en línea</span></div>
-              <div class="login-feature"><i class="bi bi-shield-check"></i><span>Acceso exclusivo para residentes y administración</span></div>
+              <div class="login-feature"><i class="bi bi-shield-check"></i><span>Acceso exclusivo para propietarios de los lotes, residentes y administración</span></div>
             </div>
             <div class="login-credit">
               <div>Sistema de gestión de reservas</div>
@@ -969,7 +969,7 @@ def login():
           <div class="col-lg-6 login-form-panel">
             <div class="login-eyebrow mb-2">Bienvenido</div>
             <h2 class="mb-2">Iniciar sesión</h2>
-            <p class="small-muted mb-4">Ingresa con las credenciales asignadas por la administración.</p>
+            <p class="small-muted mb-4">Ingresar con el Usuario y Contraseña asignados por la administración.</p>
             <form method="post" autocomplete="on">
               <div class="mb-3">
                 <label class="form-label fw-semibold" for="username">Usuario</label>
