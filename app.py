@@ -1,5 +1,5 @@
 """
-App V4.3 - Reservas Parcelación Caña Brava
+App V4.4 - Reservas Parcelación Caña Brava
 ----------------------------------------
 Novedades:
 - Reserva individual o combinada (salón + piscina)
@@ -12,6 +12,7 @@ Novedades:
 - Solicitudes por poca anticipación y por límite mensual no bloquean disponibilidad
 - Selector mensual de permisos
 - Inicio de sesión con fotografía institucional y crédito de desarrollo
+- Exportación de reservas aprobadas a Google Calendar y archivo .ics
 
 Cómo ejecutar:
     pip install flask
@@ -31,6 +32,7 @@ from functools import wraps
 import os
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -47,6 +49,7 @@ from flask import (
     request,
     session,
     url_for,
+    Response,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -955,11 +958,11 @@ def login():
                 <img src="{{ url_for('static', filename='Foto_zonacomun.jpeg') }}" alt="Zona común de la Parcelación Caña Brava">
               </div>
               <div class="text-uppercase small fw-semibold mb-3" style="letter-spacing:.14em;color:#e1c17f;">Parcelación Caña Brava</div>
-              <h1 class="mb-4">Tu zona común, mejor organizada.</h1>
-              <p class="mb-4">Consulta disponibilidad, solicita tus reservas y lleva el control de la zona común (salón y piscina) desde un solo lugar.</p>
+              <h1 class="mb-4">Tus espacios comunes, mejor organizados.</h1>
+              <p class="mb-4">Consulta disponibilidad, solicita tus reservas y lleva el control de tus espacios desde un solo lugar.</p>
               <div class="login-feature"><i class="bi bi-check-circle-fill"></i><span>Reservas claras y organizadas</span></div>
               <div class="login-feature"><i class="bi bi-calendar-check-fill"></i><span>Disponibilidad y calendario en línea</span></div>
-              <div class="login-feature"><i class="bi bi-shield-check"></i><span>Acceso exclusivo para propietarios de los lotes, residentes y administración</span></div>
+              <div class="login-feature"><i class="bi bi-shield-check"></i><span>Acceso exclusivo para residentes y administración</span></div>
             </div>
             <div class="login-credit">
               <div>Sistema de gestión de reservas</div>
@@ -969,7 +972,7 @@ def login():
           <div class="col-lg-6 login-form-panel">
             <div class="login-eyebrow mb-2">Bienvenido</div>
             <h2 class="mb-2">Iniciar sesión</h2>
-            <p class="small-muted mb-4">Ingresar con el Usuario y Contraseña asignados por la administración.</p>
+            <p class="small-muted mb-4">Ingresa con las credenciales asignadas por la administración.</p>
             <form method="post" autocomplete="on">
               <div class="mb-3">
                 <label class="form-label fw-semibold" for="username">Usuario</label>
@@ -1454,6 +1457,92 @@ def admin_calendar():
 
 
 # =========================
+# Exportación de reservas aprobadas al calendario personal
+# =========================
+def _calendar_event_data(reserva):
+    """Construye los datos comunes del evento sin modificar la reserva."""
+    fecha = reserva["fecha"]
+    if isinstance(fecha, str):
+        fecha_obj = datetime.strptime(fecha, "%Y-%m-%d").date()
+    else:
+        fecha_obj = fecha
+
+    inicio = datetime.strptime(f"{fecha_obj} {reserva['hora_inicio']}", "%Y-%m-%d %H:%M").replace(tzinfo=COLOMBIA_TZ)
+    fin = datetime.strptime(f"{fecha_obj} {reserva['hora_fin']}", "%Y-%m-%d %H:%M").replace(tzinfo=COLOMBIA_TZ)
+    titulo = f"Reserva {reserva['recurso']} - Parcelación Caña Brava"
+    descripcion = "Reserva aprobada a través del Sistema de Reservas de la Parcelación Caña Brava."
+    return inicio, fin, titulo, descripcion
+
+
+def google_calendar_url(reserva):
+    """Enlace que abre Google Calendar con el evento prellenado."""
+    inicio, fin, titulo, descripcion = _calendar_event_data(reserva)
+    params = {
+        "action": "TEMPLATE",
+        "text": titulo,
+        "dates": f"{inicio.strftime('%Y%m%dT%H%M%S')}/{fin.strftime('%Y%m%dT%H%M%S')}",
+        "ctz": "America/Bogota",
+        "details": descripcion,
+        "location": "Parcelación Caña Brava",
+    }
+    return "https://calendar.google.com/calendar/render?" + urlencode(params)
+
+
+def _ics_escape(value: str) -> str:
+    return (value or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+@app.route("/reserva/<int:reserva_id>/calendario.ics")
+@login_required
+def exportar_reserva_ics(reserva_id: int):
+    """Descarga un .ics únicamente para reservas propias y aprobadas."""
+    db = get_db()
+    reserva = db.execute(
+        """
+        SELECT r.*, rs.nombre AS recurso
+        FROM reservations r
+        JOIN resources rs ON rs.id = r.resource_id
+        WHERE r.id = ? AND r.user_id = ?
+        """,
+        (reserva_id, session["user_id"]),
+    ).fetchone()
+    if not reserva:
+        abort(404)
+    if reserva["estado"] != "aprobada":
+        flash("Solo las reservas aprobadas pueden agregarse al calendario.", "warning")
+        return redirect(url_for("mis_reservas"))
+
+    inicio, fin, titulo, descripcion = _calendar_event_data(reserva)
+    stamp = now_colombia().astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")
+    uid = f"reserva-{reserva_id}@cana-brava"
+    contenido = "\r\n".join([
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Caña Brava//Sistema de Reservas//ES",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{stamp}",
+        f"DTSTART;TZID=America/Bogota:{inicio.strftime('%Y%m%dT%H%M%S')}",
+        f"DTEND;TZID=America/Bogota:{fin.strftime('%Y%m%dT%H%M%S')}",
+        f"SUMMARY:{_ics_escape(titulo)}",
+        f"DESCRIPTION:{_ics_escape(descripcion)}",
+        "LOCATION:Parcelación Caña Brava",
+        "STATUS:CONFIRMED",
+        "END:VEVENT",
+        "END:VCALENDAR",
+        "",
+    ])
+    filename = f"reserva-cana-brava-{reserva_id}.ics"
+    return Response(
+        contenido,
+        mimetype="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# =========================
 # Usuario
 # =========================
 @app.route("/mis-reservas")
@@ -1583,6 +1672,15 @@ def mis_reservas():
                   <td>
                     {% if r['estado'] in ['pendiente', 'requiere_ajuste'] %}
                       <a class="btn btn-sm btn-outline-primary" href="{{ url_for('editar_mi_reserva', reserva_id=r['id']) }}">Editar</a>
+                    {% elif r['estado'] == 'aprobada' %}
+                      <div class="d-flex flex-wrap gap-1">
+                        <a class="btn btn-sm btn-outline-primary" target="_blank" rel="noopener" href="{{ google_calendar_url(r) }}" title="Agregar a Google Calendar">
+                          <i class="bi bi-google"></i> Google Calendar
+                        </a>
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('exportar_reserva_ics', reserva_id=r['id']) }}" title="Descargar archivo compatible con Outlook, Apple Calendar y otros calendarios">
+                          <i class="bi bi-calendar-plus"></i> Otro calendario (.ics)
+                        </a>
+                      </div>
                     {% else %}
                       <span class="text-muted">Sin acción</span>
                     {% endif %}
@@ -1604,6 +1702,7 @@ def mis_reservas():
         permisos=permisos,
         reservation_status_badge=reservation_status_badge,
         selected_month=selected_month,
+        google_calendar_url=google_calendar_url,
     )
 
 
