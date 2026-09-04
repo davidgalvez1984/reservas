@@ -1,5 +1,5 @@
 """
-App V4.4 - Reservas Parcelación Caña Brava
+App V4.5 - Reservas Parcelación Caña Brava
 ----------------------------------------
 Novedades:
 - Reserva individual o combinada (salón + piscina)
@@ -13,6 +13,7 @@ Novedades:
 - Selector mensual de permisos
 - Inicio de sesión con fotografía institucional y crédito de desarrollo
 - Exportación de reservas aprobadas a Google Calendar y archivo .ics
+- Admin: editar y eliminar fechas bloqueadas por mantenimiento o restricción
 
 Cómo ejecutar:
     pip install flask
@@ -2887,12 +2888,20 @@ def admin_blocks():
             <h4>Fechas bloqueadas</h4>
             <div class="table-responsive">
               <table class="table table-striped">
-                <thead><tr><th>Recurso</th><th>Fecha</th><th>Motivo</th></tr></thead>
+                <thead><tr><th>Recurso</th><th>Fecha</th><th>Motivo</th><th>Acciones</th></tr></thead>
                 <tbody>
                   {% for b in blocks %}
-                    <tr><td>{{ b['recurso'] }}</td><td>{{ b['fecha'] }}</td><td>{{ b['motivo'] or '' }}</td></tr>
+                    <tr>
+                      <td>{{ b['recurso'] }}</td><td>{{ b['fecha'] }}</td><td>{{ b['motivo'] or '' }}</td>
+                      <td><div class="d-flex gap-1 flex-wrap">
+                        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_editar_bloqueo', block_id=b['id']) }}"><i class="bi bi-pencil"></i> Editar</a>
+                        <form method="post" action="{{ url_for('admin_eliminar_bloqueo', block_id=b['id']) }}" class="d-inline" onsubmit="return confirm('¿Eliminar esta fecha bloqueada? La fecha volverá a quedar disponible según las demás reglas de reserva.');">
+                          <button class="btn btn-sm btn-outline-danger" type="submit"><i class="bi bi-trash"></i> Eliminar</button>
+                        </form>
+                      </div></td>
+                    </tr>
                   {% else %}
-                    <tr><td colspan="3" class="text-center text-muted">No hay fechas bloqueadas.</td></tr>
+                    <tr><td colspan="4" class="text-center text-muted">No hay fechas bloqueadas.</td></tr>
                   {% endfor %}
                 </tbody>
               </table>
@@ -2903,6 +2912,85 @@ def admin_blocks():
     </div>
     """
     return render_page(content, title="Fechas bloqueadas", recursos=recursos, blocks=blocks)
+
+
+@app.route("/admin/blocks/<int:block_id>/editar", methods=["GET", "POST"])
+@admin_required
+def admin_editar_bloqueo(block_id: int):
+    db = get_db()
+    bloqueo = db.execute("""
+        SELECT b.*, r.nombre AS recurso
+        FROM blocked_dates b JOIN resources r ON r.id = b.resource_id
+        WHERE b.id = ?
+    """, (block_id,)).fetchone()
+    if not bloqueo:
+        abort(404)
+    recursos = db.execute("SELECT * FROM resources ORDER BY id").fetchall()
+
+    if request.method == "POST":
+        try:
+            resource_id = int(request.form.get("resource_id", ""))
+        except (TypeError, ValueError):
+            resource_id = 0
+        fecha = request.form.get("fecha", "").strip()
+        motivo = request.form.get("motivo", "").strip()
+        recurso_valido = db.execute("SELECT id FROM resources WHERE id = ?", (resource_id,)).fetchone()
+
+        if not recurso_valido:
+            flash("El recurso seleccionado no es válido.", "danger")
+        elif not fecha:
+            flash("La fecha es obligatoria.", "danger")
+        else:
+            try:
+                parse_fecha(fecha)
+                db.execute("""UPDATE blocked_dates SET resource_id = ?, fecha = ?, motivo = ? WHERE id = ?""",
+                           (resource_id, fecha, motivo, block_id))
+                db.commit()
+                flash("Fecha bloqueada actualizada correctamente.", "success")
+                return redirect(url_for("admin_blocks"))
+            except ValueError:
+                flash("La fecha tiene un formato inválido.", "danger")
+            except psycopg.IntegrityError:
+                db.rollback()
+                flash("Ya existe un bloqueo para ese recurso en esa fecha.", "warning")
+
+    content = """
+    <div class="row justify-content-center"><div class="col-lg-7">
+      <div class="card card-shadow"><div class="card-body">
+        <h3>Editar fecha bloqueada</h3>
+        <p class="small-muted">Corrija el recurso, la fecha o el motivo del bloqueo. Este cambio no modifica ni elimina reservas existentes.</p>
+        <form method="post">
+          <div class="mb-3"><label class="form-label">Recurso</label>
+            <select name="resource_id" class="form-select" required>
+              {% for r in recursos %}<option value="{{ r['id'] }}" {{ 'selected' if r['id'] == bloqueo['resource_id'] else '' }}>{{ r['nombre'] }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="mb-3"><label class="form-label">Fecha</label><input type="date" name="fecha" class="form-control" value="{{ bloqueo['fecha'] }}" required></div>
+          <div class="mb-3"><label class="form-label">Motivo</label><textarea name="motivo" class="form-control" rows="3">{{ bloqueo['motivo'] or '' }}</textarea></div>
+          <button class="btn btn-primary" type="submit"><i class="bi bi-check-lg me-1"></i>Guardar cambios</button>
+          <a class="btn btn-outline-secondary" href="{{ url_for('admin_blocks') }}">Cancelar</a>
+        </form>
+      </div></div>
+    </div></div>
+    """
+    return render_page(content, title="Editar fecha bloqueada", bloqueo=bloqueo, recursos=recursos)
+
+
+@app.route("/admin/blocks/<int:block_id>/eliminar", methods=["POST"])
+@admin_required
+def admin_eliminar_bloqueo(block_id: int):
+    db = get_db()
+    bloqueo = db.execute("""
+        SELECT b.id, b.fecha, r.nombre AS recurso
+        FROM blocked_dates b JOIN resources r ON r.id = b.resource_id
+        WHERE b.id = ?
+    """, (block_id,)).fetchone()
+    if not bloqueo:
+        abort(404)
+    db.execute("DELETE FROM blocked_dates WHERE id = ?", (block_id,))
+    db.commit()
+    flash(f"Bloqueo eliminado: {bloqueo['recurso']} - {bloqueo['fecha']}. La fecha vuelve a estar disponible según las demás reglas de reserva.", "success")
+    return redirect(url_for("admin_blocks"))
 
 
 @app.route("/admin/config", methods=["GET", "POST"])
